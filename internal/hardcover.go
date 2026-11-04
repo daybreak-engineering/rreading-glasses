@@ -56,11 +56,11 @@ func (g *HCGetter) Search(ctx context.Context, query string) ([]SearchResource, 
 	}
 
 	wg := sync.WaitGroup{}
-	mu := sync.Mutex{}
 
-	results := []SearchResource{}
+	// Indexed by search rank so concurrent fetches keep Hardcover's order.
+	ranked := make([]*SearchResource, len(workIDs))
 
-	for _, workID := range workIDs {
+	for i, workID := range workIDs {
 		wg.Go(func() {
 			id := workID
 
@@ -80,20 +80,24 @@ func (g *HCGetter) Search(ctx context.Context, query string) ([]SearchResource, 
 				return
 			}
 
-			mu.Lock()
-			defer mu.Unlock()
-
-			results = append(results, SearchResource{
+			ranked[i] = &SearchResource{
 				BookID: workRsc.BestBookID,
 				WorkID: workRsc.ForeignID,
 				Author: SearchResourceAuthor{
 					ID: workRsc.Authors[0].ForeignID,
 				},
-			})
+			}
 		})
 	}
 
 	wg.Wait()
+
+	results := []SearchResource{}
+	for _, r := range ranked {
+		if r != nil {
+			results = append(results, *r)
+		}
+	}
 
 	return results, nil
 }

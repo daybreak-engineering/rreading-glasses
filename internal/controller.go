@@ -931,6 +931,21 @@ func (c *Controller) denormalizeEditions(ctx context.Context, workID int64, book
 	return nil
 }
 
+// authorForDenorm loads the author record that denormalization should modify.
+// During a refresh GetAuthor serves the pre-refresh snapshot; merging into
+// that would make each batch overwrite the previous one, so prefer the live
+// record (even if expired) and only fall back to GetAuthor without one.
+func (c *Controller) authorForDenorm(ctx context.Context, authorID int64) ([]byte, error) {
+	if b, ok := c.cache.Get(ctx, AuthorKey(authorID)); ok && len(b) > 0 && !slices.Equal(b, _missing) {
+		return b, nil
+	}
+	authorBytes, _, err := c.GetAuthor(ctx, authorID)
+	if errors.Is(err, statusErr(http.StatusTooManyRequests)) {
+		authorBytes, _, err = c.GetAuthor(ctx, authorID) // Reload if we got a cold cache.
+	}
+	return authorBytes, err
+}
+
 // denormalizeWorks ensures that the given works exist on the author. This is a
 // no-op if our cached work already includes the work's ID. This is meant to be
 // invoked in the background, and it's what allows us to support large authors.
@@ -939,10 +954,7 @@ func (c *Controller) denormalizeWorks(ctx context.Context, authorID int64, workI
 		return nil
 	}
 
-	authorBytes, _, err := c.GetAuthor(ctx, authorID)
-	if errors.Is(err, statusErr(http.StatusTooManyRequests)) {
-		authorBytes, _, err = c.GetAuthor(ctx, authorID) // Reload if we got a cold cache.
-	}
+	authorBytes, err := c.authorForDenorm(ctx, authorID)
 	if err != nil {
 		Log(ctx).Debug("problem loading author for denormalizeWorks", "err", err)
 		return err

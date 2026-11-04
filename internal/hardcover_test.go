@@ -592,3 +592,47 @@ func TestHCReleaseDate(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchKeepsRank(t *testing.T) {
+	// Works are hydrated concurrently, but results must keep Hardcover's
+	// ranking rather than completion order.
+	t.Parallel()
+
+	ctx := t.Context()
+	cache := newMemoryCache()
+
+	ids := []int64{}
+	for i := int64(50); i > 0; i-- {
+		ids = append(ids, i)
+		workBytes, err := json.Marshal(workResource{
+			ForeignID:  i,
+			BestBookID: i * 10,
+			Authors:    []AuthorResource{{ForeignID: 1}},
+		})
+		require.NoError(t, err)
+		cache.Set(ctx, WorkKey(i), workBytes, time.Hour)
+	}
+
+	gql := hardcover.NewMockgql(gomock.NewController(t))
+	gql.EXPECT().MakeRequest(gomock.Any(),
+		gomock.AssignableToTypeOf(&graphql.Request{}),
+		gomock.AssignableToTypeOf(&graphql.Response{})).DoAndReturn(
+		func(_ context.Context, req *graphql.Request, res *graphql.Response) error {
+			sr, ok := res.Data.(*hardcover.SearchResponse)
+			require.True(t, ok, req.OpName)
+			sr.Search.Ids = ids
+			return nil
+		})
+
+	getter, err := NewHardcoverGetter(cache, gql)
+	require.NoError(t, err)
+
+	results, err := getter.Search(ctx, "anything")
+	require.NoError(t, err)
+
+	got := []int64{}
+	for _, r := range results {
+		got = append(got, r.WorkID)
+	}
+	assert.Equal(t, ids, got)
+}
