@@ -62,7 +62,7 @@ func (s *server) Run() error {
 		RoundTripper: &internal.HeaderTransport{
 			Key:          "Authorization",
 			Value:        s.HardcoverAuth,
-			RoundTripper: http.DefaultTransport,
+			RoundTripper: &internal.RetryTransport{RoundTripper: http.DefaultTransport},
 		},
 	}
 
