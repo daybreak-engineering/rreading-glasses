@@ -2225,7 +2225,7 @@ const GetAuthorEditions_Operation = `
 query GetAuthorEditions ($id: Int!, $limit: Int!, $offset: Int!) {
 	authors_by_pk(id: $id) {
 		... AuthorInfo
-		contributions(limit: $limit, offset: $offset, order_by: {book:{ratings_count:desc}}, where: {contributable_type:{_eq:"Book"},book:{book_status_id:{_eq:"1"}}}) {
+		contributions(limit: $limit, offset: $offset, order_by: [{book:{ratings_count:desc}},{id:asc}], where: {contributable_type:{_eq:"Book"},book:{book_status_id:{_eq:"1"}}}) {
 			... Contributions
 			book {
 				id

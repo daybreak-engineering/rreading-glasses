@@ -636,3 +636,57 @@ func TestSearchKeepsRank(t *testing.T) {
 	}
 	assert.Equal(t, ids, got)
 }
+
+func TestGetAuthorBooksDedupes(t *testing.T) {
+	// One row per contribution: a book crediting the author twice must only
+	// be yielded once, or duplicates count against the refresh cap.
+	t.Parallel()
+
+	authorID := int64(7)
+	author := hardcover.ContributionsAuthorAuthors{AuthorInfo: hardcover.AuthorInfo{Id: authorID}}
+	row := func(bookID, editionID int64, role string) hardcover.GetAuthorEditionsAuthors_by_pkAuthorsContributions {
+		return hardcover.GetAuthorEditionsAuthors_by_pkAuthorsContributions{
+			Contributions: hardcover.Contributions{Author: author, Contribution: role},
+			Book: hardcover.GetAuthorEditionsAuthors_by_pkAuthorsContributionsBookBooks{
+				Id: bookID,
+				DefaultEditions: hardcover.DefaultEditions{
+					Id:            bookID,
+					Contributions: []hardcover.DefaultEditionsContributions{{Contributions: hardcover.Contributions{Author: author}}},
+					Default_cover_edition: hardcover.DefaultEditionsDefault_cover_editionEditions{
+						Id: editionID,
+						Contributions: []hardcover.DefaultEditionsDefault_cover_editionEditionsContributions{
+							{Contributions: hardcover.Contributions{Author: author}},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	pages := [][]hardcover.GetAuthorEditionsAuthors_by_pkAuthorsContributions{
+		{row(1, 10, "Author"), row(1, 10, "Editor"), row(2, 20, "Author")},
+		{},
+	}
+
+	gql := hardcover.NewMockgql(gomock.NewController(t))
+	gql.EXPECT().MakeRequest(gomock.Any(),
+		gomock.AssignableToTypeOf(&graphql.Request{}),
+		gomock.AssignableToTypeOf(&graphql.Response{})).DoAndReturn(
+		func(_ context.Context, req *graphql.Request, res *graphql.Response) error {
+			gaw, ok := res.Data.(*hardcover.GetAuthorEditionsResponse)
+			require.True(t, ok, req.OpName)
+			gaw.Authors_by_pk.Id = authorID
+			gaw.Authors_by_pk.Contributions = pages[0]
+			pages = pages[1:]
+			return nil
+		}).Times(2)
+
+	getter, err := NewHardcoverGetter(newMemoryCache(), gql)
+	require.NoError(t, err)
+
+	got := []int64{}
+	for id := range getter.GetAuthorBooks(t.Context(), authorID) {
+		got = append(got, id)
+	}
+	assert.Equal(t, []int64{10, 20}, got)
+}

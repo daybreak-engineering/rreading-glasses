@@ -40,6 +40,11 @@ var (
 
 	_seriesTTL = 14 * 24 * time.Hour // 2 weeks
 
+	// _maxAuthorWorks caps one refresh. Works arrive most-rated first, so
+	// only the least-rated tail is lost; 1000 cut off real books for authors
+	// like Asimov (~1300 works).
+	_maxAuthorWorks = 3000
+
 	// _missing is a sentinel value we cache for 404 responses.
 	_missing = []byte{0}
 
@@ -712,7 +717,7 @@ func (c *Controller) refreshAuthor(ctx context.Context, authorID int64, cachedBy
 	workIDSToDenormalize := []int64{}
 
 	for bookID := range c.getter.GetAuthorBooks(ctx, authorID) {
-		if n > 1000 {
+		if n > _maxAuthorWorks {
 			Log(ctx).Warn("found too many editions", "authorID", authorID)
 			break // Some authors (e.g. Wikipedia) have an obscene number of works. Give up.
 		}

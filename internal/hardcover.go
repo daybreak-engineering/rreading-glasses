@@ -336,6 +336,9 @@ func mapHardcoverToWorkResource(ctx context.Context, edition hardcover.EditionIn
 func (g *HCGetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq[int64] {
 	return func(yield func(int64) bool) {
 		limit, offset := int64(100), int64(0)
+		// Hardcover returns one row per contribution, so a book crediting the
+		// author more than once appears more than once.
+		seen := map[int64]struct{}{}
 		for {
 			editions, err := hardcover.GetAuthorEditions(ctx, g.gql, authorID, limit, offset)
 			if err != nil {
@@ -348,6 +351,11 @@ func (g *HCGetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq[
 			}
 
 			for _, c := range editions.Authors_by_pk.Contributions {
+				if _, ok := seen[c.Book.Id]; ok {
+					continue
+				}
+				seen[c.Book.Id] = struct{}{}
+
 				author, err := bestAuthor(hardcover.AsContributions(c.Book.Contributions))
 				if err != nil {
 					continue
