@@ -51,7 +51,7 @@ func TestQueryBuilderMultipleQueries(t *testing.T) {
   }
   %s: authors_by_pk(id: $%s_id) {
     ...AuthorInfo
-    contributions(limit: $%s_limit, offset: $%s_offset, order_by: {book: {ratings_count: desc}}, where: {contributable_type: {_eq: "Book"}, book: {book_status_id: {_eq: "1"}}}) {
+    contributions(limit: $%s_limit, offset: $%s_offset, order_by: [{book: {ratings_count: desc}}, {id: asc}], where: {contributable_type: {_eq: "Book"}, book: {book_status_id: {_eq: "1"}}}) {
       ...Contributions
       book {
         id

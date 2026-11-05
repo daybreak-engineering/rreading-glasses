@@ -493,10 +493,14 @@ func TestFuzz(t *testing.T) {
 }
 
 func waitForDenorm(ctrl *Controller) {
-	for ctrl.metrics.refreshWaitingGet() != 0 {
+	// Bounded: the denormWaiting gauge is set from the buffer length before
+	// accumulate pops the edge it just handed over, so it can stick at a
+	// stale non-zero value with nothing left to do (hung CI for 10m).
+	deadline := time.Now().Add(10 * time.Second)
+	for ctrl.metrics.refreshWaitingGet() != 0 && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
-	for ctrl.metrics.denormWaitingGet() != 0 {
+	for ctrl.metrics.denormWaitingGet() != 0 && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
