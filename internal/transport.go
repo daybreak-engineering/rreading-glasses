@@ -2,9 +2,12 @@ package internal
 
 import (
 	"cmp"
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -128,4 +131,88 @@ func (t errorProxyTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 		return nil, statusErr(resp.StatusCode)
 	}
 	return resp, nil
+}
+
+// errBudgetExhausted is returned instead of sending a request once the daily
+// budget is spent.
+var errBudgetExhausted = errors.Join(statusErr(http.StatusTooManyRequests), errors.New("upstream daily request budget exhausted"))
+
+// BudgetTransport caps requests over a rolling 24h window, counted in hourly
+// buckets. Requests past the cap fail without being sent. Counts are kept in
+// memory, so a restart resets them.
+type BudgetTransport struct {
+	http.RoundTripper
+	Daily      int64   // Cap per 24h; 0 disables the cap.
+	Background float64 // Share of Daily that background work may use; defaults to 0.8.
+
+	mu     sync.Mutex
+	counts [24]int64
+	hours  [24]int64 // Unix hour each bucket was last used for.
+	now    func() time.Time
+	warned bool
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t *BudgetTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if !t.take() {
+		return nil, errBudgetExhausted
+	}
+	return t.RoundTripper.RoundTrip(r)
+}
+
+func (t *BudgetTransport) take() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	used := t.usedLocked()
+	if t.Daily > 0 && used >= t.Daily {
+		if !t.warned {
+			t.warned = true
+			Log(context.Background()).Error("upstream daily request budget exhausted", "daily", t.Daily)
+		}
+		return false
+	}
+	t.warned = false
+	h := t.hour()
+	t.counts[h%24]++
+	return true
+}
+
+// Used returns requests sent in the last 24h.
+func (t *BudgetTransport) Used() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.usedLocked()
+}
+
+// AllowBackground reports whether background work may still send requests.
+func (t *BudgetTransport) AllowBackground() bool {
+	if t.Daily <= 0 {
+		return true
+	}
+	share := cmp.Or(t.Background, 0.8)
+	return float64(t.Used()) < float64(t.Daily)*share
+}
+
+func (t *BudgetTransport) hour() int64 {
+	now := time.Now
+	if t.now != nil {
+		now = t.now
+	}
+	h := now().Unix() / 3600
+	if t.hours[h%24] != h {
+		t.hours[h%24] = h
+		t.counts[h%24] = 0
+	}
+	return h
+}
+
+func (t *BudgetTransport) usedLocked() int64 {
+	h := t.hour()
+	var sum int64
+	for i := range t.counts {
+		if h-t.hours[i] < 24 {
+			sum += t.counts[i]
+		}
+	}
+	return sum
 }

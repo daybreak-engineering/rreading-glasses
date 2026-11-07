@@ -77,3 +77,38 @@ func TestRetryTransportNoRetryOn4xx(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 	assert.Equal(t, 1, calls)
 }
+
+func TestBudgetTransport(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_800_000_000, 0)
+	sent := 0
+	bt := &BudgetTransport{
+		Daily:      4,
+		Background: 0.5,
+		now:        func() time.Time { return now },
+		RoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			sent++
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		}),
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.invalid", nil)
+	require.NoError(t, err)
+
+	for i := range 4 {
+		assert.Equal(t, i < 2, bt.AllowBackground(), "background after %d requests", i)
+		_, err := bt.RoundTrip(req)
+		require.NoError(t, err)
+		now = now.Add(time.Hour)
+	}
+
+	_, err = bt.RoundTrip(req)
+	require.ErrorIs(t, err, errBudgetExhausted)
+	assert.Equal(t, 4, sent, "request past the cap is not sent")
+
+	// The first request falls out of the 24h window.
+	now = now.Add(20 * time.Hour)
+	assert.Equal(t, int64(3), bt.Used())
+	_, err = bt.RoundTrip(req)
+	require.NoError(t, err)
+}

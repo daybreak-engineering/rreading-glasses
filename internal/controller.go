@@ -27,18 +27,19 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// Use lower values while we're beta testing.
+// TTLs only decide when an entry is revalidated; expired entries are still
+// served while a background refresh runs.
 var (
-	_authorTTL = 7 * 24 * time.Hour // 7 days.
-	// _authorTTL  = 30 * 24 * time.Hour     // 1 month.
+	_authorTTL  = 30 * 24 * time.Hour
+	_workTTL    = 90 * 24 * time.Hour
+	_editionTTL = 180 * 24 * time.Hour
+	_seriesTTL  = 30 * 24 * time.Hour
 
-	_workTTL = 14 * 24 * time.Hour // 2 weeks.
-	// _workTTL    = 30 * 24 * time.Hour     // 1 month.
+	// _staleTTL is the HTTP cache lifetime reported for expired entries.
+	_staleTTL = time.Hour
 
-	_editionTTL = 28 * 24 * time.Hour // 1 month.
-	// _editionTTL = 6 * 30 * 24 * time.Hour // 6 months.
-
-	_seriesTTL = 14 * 24 * time.Hour // 2 weeks
+	// _refreshRetry is how long a failed author refresh waits to retry.
+	_refreshRetry = time.Hour
 
 	// _maxAuthorWorks caps one refresh. Works arrive most-rated first, so
 	// only the least-rated tail is lost; 1000 cut off real books for authors
@@ -95,8 +96,25 @@ type Controller struct {
 	// workG collects work refreshes.
 	workG errgroup.Group
 
+	// revalidateG bounds background refreshes of stale entries; revalidating
+	// holds the keys in flight.
+	revalidateG  errgroup.Group
+	revalidating sync.Map
+
+	budget Budget
+
 	metrics *controllerMetrics
 }
+
+// Budget reports whether optional upstream work (revalidation, author
+// refreshes) may spend requests.
+type Budget interface {
+	AllowBackground() bool
+}
+
+type unlimited struct{}
+
+func (unlimited) AllowBackground() bool { return true }
 
 // getter allows alternative implementations of the core logic to be injected.
 // Don't write to the cache if you use it.
@@ -123,7 +141,9 @@ type getter interface {
 	// A serialized AuthorResource is returned.
 	GetAuthor(ctx context.Context, authorID int64) ([]byte, error)
 
-	GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq[int64] // Returns book/edition IDs, not works.
+	// GetAuthorBooks returns book/edition IDs, not works. An error means the
+	// walk is incomplete.
+	GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq2[int64, error]
 
 	// GetSeries returns a list of works contained in a series. The works may
 	// not all be by the same author.
@@ -181,6 +201,7 @@ func NewController(cache cache[[]byte], getter getter, persister persister, reg 
 		cache:     cache,
 		getter:    getter,
 		persister: &nopersist{},
+		budget:    unlimited{},
 		metrics:   metrics,
 
 		denormC:  make(chan edge),
@@ -192,8 +213,44 @@ func NewController(cache cache[[]byte], getter getter, persister persister, reg 
 
 	c.refreshG.SetLimit(30)
 	c.workG.SetLimit(25) // Sure why not.
+	c.revalidateG.SetLimit(10)
 
 	return c, nil
+}
+
+// SetBudget limits background upstream work.
+func (c *Controller) SetBudget(b Budget) {
+	if b != nil {
+		c.budget = b
+	}
+}
+
+// revalidate refreshes a stale entry in the background. It's skipped when the
+// budget is low, the key is already in flight, or the pool is full; the next
+// read tries again.
+func (c *Controller) revalidate(key string, f func(context.Context)) {
+	if !c.budget.AllowBackground() {
+		return
+	}
+	if _, busy := c.revalidating.LoadOrStore(key, struct{}{}); busy {
+		return
+	}
+	ok := c.revalidateG.TryGo(func() error {
+		defer c.revalidating.Delete(key)
+		ctx := context.WithValue(context.Background(), middleware.RequestIDKey, "revalidate-"+key)
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		defer func() {
+			if r := recover(); r != nil {
+				Log(ctx).Error("panic", "details", r)
+			}
+		}()
+		f(ctx)
+		return nil
+	})
+	if !ok {
+		c.revalidating.Delete(key)
+	}
 }
 
 // GetBook loads a book (edition) or returns a cached value if one exists.
@@ -419,16 +476,31 @@ func (c *Controller) setISBN(ctx context.Context, isbn isbn.ISBN, editionID int6
 
 func (c *Controller) getBook(ctx context.Context, bookID int64) (ttlpair, error) {
 	workBytes, ttl, ok := c.cache.GetWithTTL(ctx, BookKey(bookID))
-	if ok && ttl > 0 {
+	if ok && len(workBytes) > 0 {
+		if ttl <= 0 {
+			c.revalidate(BookKey(bookID), func(ctx context.Context) {
+				_, _ = c.loadBook(ctx, bookID, workBytes)
+			})
+			ttl = _staleTTL
+		}
 		if slices.Equal(workBytes, _missing) {
 			return ttlpair{}, errNotFound
 		}
 		return ttlpair{bytes: workBytes, ttl: ttl}, nil
 	}
+	return c.loadBook(ctx, bookID, nil)
+}
 
-	// Cache miss.
+// loadBook fetches a book upstream. prev is the stale cached value, if any;
+// it's kept when the upstream fails or no longer has the book.
+func (c *Controller) loadBook(ctx context.Context, bookID int64, prev []byte) (ttlpair, error) {
 	workBytes, workID, authorID, err := c.getter.GetBook(ctx, bookID, c.saveEditions)
 	if errors.Is(err, errNotFound) {
+		if keepStale(prev) {
+			Log(ctx).Warn("book gone upstream, keeping cached copy", "bookID", bookID)
+			c.cache.Set(ctx, BookKey(bookID), prev, _missingTTL)
+			return ttlpair{bytes: prev, ttl: _staleTTL}, nil
+		}
 		c.cache.Set(ctx, BookKey(bookID), _missing, _missingTTL)
 		return ttlpair{}, err
 	}
@@ -437,7 +509,7 @@ func (c *Controller) getBook(ctx context.Context, bookID int64) (ttlpair, error)
 		return ttlpair{}, err
 	}
 
-	ttl = fuzz(_editionTTL, 2.0)
+	ttl := fuzz(_editionTTL, 2.0)
 	c.cache.Set(ctx, BookKey(bookID), workBytes, ttl)
 
 	if workID > 0 {
@@ -475,16 +547,35 @@ func (c *Controller) getBook(ctx context.Context, bookID int64) (ttlpair, error)
 
 func (c *Controller) getWork(ctx context.Context, workID int64) (ttlpair, error) {
 	cachedBytes, ttl, ok := c.cache.GetWithTTL(ctx, WorkKey(workID))
-	if ok && ttl > 0 {
+	if ok && len(cachedBytes) > 0 {
+		if ttl <= 0 {
+			c.revalidate(WorkKey(workID), func(ctx context.Context) {
+				_, _ = c.loadWork(ctx, workID, cachedBytes)
+			})
+			ttl = _staleTTL
+		}
 		if slices.Equal(cachedBytes, _missing) {
 			return ttlpair{}, errNotFound
 		}
 		return ttlpair{bytes: cachedBytes, ttl: ttl}, nil
 	}
+	return c.loadWork(ctx, workID, nil)
+}
 
-	// Cache miss.
+// loadWork fetches a work upstream. cachedBytes is the stale cached value, if
+// any; its editions are carried over and it's kept when the upstream no longer
+// has the work.
+func (c *Controller) loadWork(ctx context.Context, workID int64, cachedBytes []byte) (ttlpair, error) {
+	if slices.Equal(cachedBytes, _missing) {
+		cachedBytes = nil
+	}
 	workBytes, authorID, err := c.getter.GetWork(ctx, workID, c.saveEditions)
 	if errors.Is(err, errNotFound) {
+		if keepStale(cachedBytes) {
+			Log(ctx).Warn("work gone upstream, keeping cached copy", "workID", workID)
+			c.cache.Set(ctx, WorkKey(workID), cachedBytes, _missingTTL)
+			return ttlpair{bytes: cachedBytes, ttl: _staleTTL}, nil
+		}
 		c.cache.Set(ctx, WorkKey(workID), _missing, _missingTTL)
 		return ttlpair{}, err
 	}
@@ -493,7 +584,7 @@ func (c *Controller) getWork(ctx context.Context, workID int64) (ttlpair, error)
 		return ttlpair{}, err
 	}
 
-	ttl = fuzz(_workTTL, 1.5)
+	ttl := fuzz(_workTTL, 1.5)
 	c.cache.Set(ctx, WorkKey(workID), workBytes, ttl)
 
 	// Ensuring relationships doesn't block.
@@ -542,13 +633,21 @@ func (c *Controller) getWork(ctx context.Context, workID int64) (ttlpair, error)
 
 func (c *Controller) getSeries(ctx context.Context, seriesID int64) ([]byte, error) {
 	seriesBytes, ttl, ok := c.cache.GetWithTTL(ctx, seriesKey(seriesID))
-	if ok && ttl > 0 {
+	if ok && len(seriesBytes) > 0 {
+		if ttl <= 0 {
+			c.revalidate(seriesKey(seriesID), func(ctx context.Context) {
+				_, _ = c.loadSeries(ctx, seriesID)
+			})
+		}
 		if slices.Equal(seriesBytes, _missing) {
 			return nil, errNotFound
 		}
 		return seriesBytes, nil
 	}
+	return c.loadSeries(ctx, seriesID)
+}
 
+func (c *Controller) loadSeries(ctx context.Context, seriesID int64) ([]byte, error) {
 	Log(ctx).Debug("getting series", "seriesID", seriesID)
 
 	series, err := c.getter.GetSeries(ctx, seriesID)
@@ -645,27 +744,46 @@ func (c *Controller) saveEditions(grBooks ...workResource) {
 func (c *Controller) getAuthor(ctx context.Context, authorID int64) (ttlpair, error) {
 	// We prefer a refresh key, if one exists, because it contains the author's
 	// state prior to refreshing.
-	preRefreshBytes, ok := c.cache.Get(ctx, refreshAuthorKey(authorID))
-	if ok {
+	// An expired (busted) snapshot is ignored so the bust can start a refresh.
+	preRefreshBytes, ttl, ok := c.cache.GetWithTTL(ctx, refreshAuthorKey(authorID))
+	if ok && ttl > 0 && len(preRefreshBytes) > 0 {
 		if slices.Equal(preRefreshBytes, _missing) {
 			return ttlpair{}, errNotFound
 		}
 		return ttlpair{bytes: preRefreshBytes, ttl: time.Hour}, nil
 	}
 
-	// If we're not refreshing then return the cached value as long as it's
-	// still valid.
+	// Serve whatever we have; refresh in the background once it expires.
 	cachedBytes, ttl, ok := c.cache.GetWithTTL(ctx, AuthorKey(authorID))
-	if ok && ttl > 0 {
+	if ok && len(cachedBytes) > 0 {
+		if ttl <= 0 {
+			c.revalidate(AuthorKey(authorID), func(ctx context.Context) {
+				_, _ = c.loadAuthor(ctx, authorID, cachedBytes)
+			})
+			ttl = _staleTTL
+		}
 		if slices.Equal(cachedBytes, _missing) {
 			return ttlpair{}, errNotFound
 		}
 		return ttlpair{bytes: cachedBytes, ttl: ttl}, nil
 	}
+	return c.loadAuthor(ctx, authorID, nil)
+}
 
-	// Cache miss. Fetch new data.
+// loadAuthor fetches an author's details upstream and starts a refresh of its
+// works. cachedBytes is the previous record, if any; its works are kept so a
+// refresh only ever adds works.
+func (c *Controller) loadAuthor(ctx context.Context, authorID int64, cachedBytes []byte) (ttlpair, error) {
+	if slices.Equal(cachedBytes, _missing) {
+		cachedBytes = nil
+	}
 	authorBytes, err := c.getter.GetAuthor(ctx, authorID)
 	if errors.Is(err, errNotFound) {
+		if keepStale(cachedBytes) {
+			Log(ctx).Warn("author gone upstream, keeping cached copy", "authorID", authorID)
+			c.cache.Set(ctx, AuthorKey(authorID), cachedBytes, _missingTTL)
+			return ttlpair{bytes: cachedBytes, ttl: _staleTTL}, nil
+		}
 		c.cache.Set(ctx, AuthorKey(authorID), _missing, _missingTTL)
 		return ttlpair{}, err
 	}
@@ -674,7 +792,11 @@ func (c *Controller) getAuthor(ctx context.Context, authorID int64) (ttlpair, er
 		return ttlpair{}, err
 	}
 
-	ttl = fuzz(_authorTTL, 1.5)
+	if len(cachedBytes) > 0 {
+		authorBytes = mergeAuthorWorks(ctx, authorBytes, cachedBytes)
+	}
+
+	ttl := fuzz(_authorTTL, 1.5)
 	c.cache.Set(ctx, AuthorKey(authorID), authorBytes, ttl)
 
 	// From here we'll prefer to use the last-known state. If this is the first
@@ -710,13 +832,24 @@ func (c *Controller) refreshAuthor(ctx context.Context, authorID int64, cachedBy
 		}
 	}()
 
+	if !c.budget.AllowBackground() {
+		Log(ctx).Warn("upstream budget low, deferring author refresh", "authorID", authorID)
+		c.retryRefresh(authorID, cachedBytes)
+		return
+	}
+
 	Log(ctx).Info("fetching all works for author", "authorID", authorID)
 
 	n := 0
 	start := time.Now()
 	workIDSToDenormalize := []int64{}
+	failed := false
 
-	for bookID := range c.getter.GetAuthorBooks(ctx, authorID) {
+	for bookID, err := range c.getter.GetAuthorBooks(ctx, authorID) {
+		if err != nil {
+			failed = true
+			break
+		}
 		if n > _maxAuthorWorks {
 			Log(ctx).Warn("found too many editions", "authorID", authorID)
 			break // Some authors (e.g. Wikipedia) have an obscene number of works. Give up.
@@ -724,6 +857,9 @@ func (c *Controller) refreshAuthor(ctx context.Context, authorID int64, cachedBy
 		bookBytes, _, err := c.GetBook(ctx, bookID)
 		if err != nil {
 			Log(ctx).Warn("problem getting book for author", "authorID", authorID, "bookID", bookID, "err", err)
+			if !errors.Is(err, errNotFound) {
+				failed = true
+			}
 			continue
 		}
 		var w workResource
@@ -744,11 +880,64 @@ func (c *Controller) refreshAuthor(ctx context.Context, authorID int64, cachedBy
 	slices.Sort(workIDSToDenormalize)
 	workIDSToDenormalize = slices.Compact(workIDSToDenormalize)
 
+	// Works only get added, so a partial list is still safe to merge.
 	if len(workIDSToDenormalize) > 0 {
 		c.denormC <- edge{kind: authorEdge, parentID: authorID, childIDs: newSet(workIDSToDenormalize...)}
 	}
+	if failed {
+		// Keep the pre-refresh snapshot (served to readers, resumed on
+		// restart) and try again later.
+		Log(ctx).Warn("author refresh incomplete, will retry", "authorID", authorID, "count", len(workIDSToDenormalize), "retryIn", _refreshRetry.String())
+		c.retryRefresh(authorID, cachedBytes)
+		return
+	}
 	c.denormC <- edge{kind: refreshDone, parentID: authorID}
 	Log(ctx).Info("fetched all works for author", "authorID", authorID, "count", len(workIDSToDenormalize), "duration", time.Since(start).String())
+}
+
+// retryRefresh schedules another refresh of an author whose refresh didn't
+// complete.
+func (c *Controller) retryRefresh(authorID int64, state []byte) {
+	c.metrics.refreshWaitingAdd(-1)
+	time.AfterFunc(_refreshRetry, func() {
+		c.refreshC <- refreshAuthor{id: authorID, state: state}
+	})
+}
+
+// keepStale reports whether a previous cached value is worth keeping over a
+// 404.
+func keepStale(b []byte) bool {
+	return len(b) > 0 && !slices.Equal(b, _missing)
+}
+
+// mergeAuthorWorks returns fresh with any works from prev it lacks. Works
+// stay sorted by ID.
+func mergeAuthorWorks(ctx context.Context, fresh, prev []byte) []byte {
+	var f, p AuthorResource
+	if err := sonic.ConfigStd.Unmarshal(fresh, &f); err != nil {
+		return fresh
+	}
+	if err := sonic.ConfigStd.Unmarshal(prev, &p); err != nil {
+		Log(ctx).Warn("problem unmarshaling previous author", "err", err, "authorID", f.ForeignID)
+		return fresh
+	}
+	slices.SortFunc(f.Works, func(a, b workResource) int { return cmp.Compare(a.ForeignID, b.ForeignID) })
+	for _, w := range p.Works {
+		idx, found := slices.BinarySearchFunc(f.Works, w.ForeignID, func(w workResource, id int64) int {
+			return cmp.Compare(w.ForeignID, id)
+		})
+		if !found {
+			f.Works = slices.Insert(f.Works, idx, w)
+		}
+	}
+	if len(f.Series) == 0 {
+		f.Series = p.Series
+	}
+	out, err := sonic.ConfigStd.Marshal(f)
+	if err != nil {
+		return fresh
+	}
+	return out
 }
 
 // Run is responsible for denormalizing data and handling our worker pools.

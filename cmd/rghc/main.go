@@ -16,6 +16,7 @@ import (
 	"github.com/blampe/rreading-glasses/cmd"
 	"github.com/blampe/rreading-glasses/internal"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // cli contains our command-line flags.
@@ -36,6 +37,8 @@ type server struct {
 
 	HardcoverAuth     string `required:"" env:"HARDCOVER_AUTH" xor:"hardcover-auth" help:"Hardcover Authorization header, e.g. 'Bearer ...'"`
 	HardcoverAuthFile []byte `required:"" type:"filecontent" xor:"hardcover-auth" env:"HARDCOVER_AUTH_FILE" help:"File containing the Hardcover Authorization header, e.g. 'Bearer ...'"`
+
+	HardcoverDailyBudget int64 `default:"40000" env:"HARDCOVER_DAILY_BUDGET" help:"Max Hardcover requests per rolling 24h (0 = no cap). Background refreshes stop at 80%."`
 }
 
 func (s *server) Run() error {
@@ -57,12 +60,19 @@ func (s *server) Run() error {
 		s.HardcoverAuth = string(bytes.TrimSpace(s.HardcoverAuthFile))
 	}
 
+	// Inside RetryTransport so every attempt counts against the budget.
+	budget := &internal.BudgetTransport{RoundTripper: http.DefaultTransport, Daily: s.HardcoverDailyBudget}
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "rg_upstream_requests_24h",
+		Help: "Upstream requests sent in the last 24h.",
+	}, func() float64 { return float64(budget.Used()) }))
+
 	hcTransport := internal.ScopedTransport{
 		Host: s.Upstream,
 		RoundTripper: &internal.HeaderTransport{
 			Key:          "Authorization",
 			Value:        s.HardcoverAuth,
-			RoundTripper: &internal.RetryTransport{RoundTripper: http.DefaultTransport},
+			RoundTripper: &internal.RetryTransport{RoundTripper: budget},
 		},
 	}
 
@@ -87,6 +97,7 @@ func (s *server) Run() error {
 	if err != nil {
 		return err
 	}
+	ctrl.SetBudget(budget)
 	h := internal.NewHandler(ctrl)
 	mux := internal.NewMux(h, reg)
 

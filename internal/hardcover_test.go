@@ -413,7 +413,8 @@ func TestHardcoverIntegration(t *testing.T) {
 		t.Parallel()
 		iter := getter.GetAuthorBooks(t.Context(), 91460)
 		gotBook := false
-		for workID := range iter {
+		for workID, err := range iter {
+			require.NoError(t, err)
 			if workID == 30713111 {
 				gotBook = true
 			}
@@ -685,7 +686,8 @@ func TestGetAuthorBooksDedupes(t *testing.T) {
 	require.NoError(t, err)
 
 	got := []int64{}
-	for id := range getter.GetAuthorBooks(t.Context(), authorID) {
+	for id, err := range getter.GetAuthorBooks(t.Context(), authorID) {
+		require.NoError(t, err)
 		got = append(got, id)
 	}
 	assert.Equal(t, []int64{10, 20}, got)

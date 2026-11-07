@@ -17,6 +17,68 @@ import (
 	gomock "go.uber.org/mock/gomock"
 )
 
+// MockBudget is a mock of Budget interface.
+type MockBudget struct {
+	ctrl     *gomock.Controller
+	recorder *MockBudgetMockRecorder
+	isgomock struct{}
+}
+
+// MockBudgetMockRecorder is the mock recorder for MockBudget.
+type MockBudgetMockRecorder struct {
+	mock *MockBudget
+}
+
+// NewMockBudget creates a new mock instance.
+func NewMockBudget(ctrl *gomock.Controller) *MockBudget {
+	mock := &MockBudget{ctrl: ctrl}
+	mock.recorder = &MockBudgetMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *MockBudget) EXPECT() *MockBudgetMockRecorder {
+	return m.recorder
+}
+
+// AllowBackground mocks base method.
+func (m *MockBudget) AllowBackground() bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AllowBackground")
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// AllowBackground indicates an expected call of AllowBackground.
+func (mr *MockBudgetMockRecorder) AllowBackground() *MockBudgetAllowBackgroundCall {
+	mr.mock.ctrl.T.Helper()
+	call := mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AllowBackground", reflect.TypeOf((*MockBudget)(nil).AllowBackground))
+	return &MockBudgetAllowBackgroundCall{Call: call}
+}
+
+// MockBudgetAllowBackgroundCall wrap *gomock.Call
+type MockBudgetAllowBackgroundCall struct {
+	*gomock.Call
+}
+
+// Return rewrite *gomock.Call.Return
+func (c *MockBudgetAllowBackgroundCall) Return(arg0 bool) *MockBudgetAllowBackgroundCall {
+	c.Call = c.Call.Return(arg0)
+	return c
+}
+
+// Do rewrite *gomock.Call.Do
+func (c *MockBudgetAllowBackgroundCall) Do(f func() bool) *MockBudgetAllowBackgroundCall {
+	c.Call = c.Call.Do(f)
+	return c
+}
+
+// DoAndReturn rewrite *gomock.Call.DoAndReturn
+func (c *MockBudgetAllowBackgroundCall) DoAndReturn(f func() bool) *MockBudgetAllowBackgroundCall {
+	c.Call = c.Call.DoAndReturn(f)
+	return c
+}
+
 // Mockgetter is a mock of getter interface.
 type Mockgetter struct {
 	ctrl     *gomock.Controller
@@ -81,10 +143,10 @@ func (c *MockgetterGetAuthorCall) DoAndReturn(f func(context.Context, int64) ([]
 }
 
 // GetAuthorBooks mocks base method.
-func (m *Mockgetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq[int64] {
+func (m *Mockgetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq2[int64, error] {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetAuthorBooks", ctx, authorID)
-	ret0, _ := ret[0].(iter.Seq[int64])
+	ret0, _ := ret[0].(iter.Seq2[int64, error])
 	return ret0
 }
 
@@ -101,19 +163,19 @@ type MockgetterGetAuthorBooksCall struct {
 }
 
 // Return rewrite *gomock.Call.Return
-func (c *MockgetterGetAuthorBooksCall) Return(arg0 iter.Seq[int64]) *MockgetterGetAuthorBooksCall {
+func (c *MockgetterGetAuthorBooksCall) Return(arg0 iter.Seq2[int64, error]) *MockgetterGetAuthorBooksCall {
 	c.Call = c.Call.Return(arg0)
 	return c
 }
 
 // Do rewrite *gomock.Call.Do
-func (c *MockgetterGetAuthorBooksCall) Do(f func(context.Context, int64) iter.Seq[int64]) *MockgetterGetAuthorBooksCall {
+func (c *MockgetterGetAuthorBooksCall) Do(f func(context.Context, int64) iter.Seq2[int64, error]) *MockgetterGetAuthorBooksCall {
 	c.Call = c.Call.Do(f)
 	return c
 }
 
 // DoAndReturn rewrite *gomock.Call.DoAndReturn
-func (c *MockgetterGetAuthorBooksCall) DoAndReturn(f func(context.Context, int64) iter.Seq[int64]) *MockgetterGetAuthorBooksCall {
+func (c *MockgetterGetAuthorBooksCall) DoAndReturn(f func(context.Context, int64) iter.Seq2[int64, error]) *MockgetterGetAuthorBooksCall {
 	c.Call = c.Call.DoAndReturn(f)
 	return c
 }

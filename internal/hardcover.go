@@ -332,9 +332,10 @@ func mapHardcoverToWorkResource(ctx context.Context, edition hardcover.EditionIn
 	return workRsc, nil
 }
 
-// GetAuthorBooks returns all GR book (edition) IDs.
-func (g *HCGetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq[int64] {
-	return func(yield func(int64) bool) {
+// GetAuthorBooks returns all GR book (edition) IDs. A failed page yields its
+// error and ends the walk.
+func (g *HCGetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq2[int64, error] {
+	return func(yield func(int64, error) bool) {
 		limit, offset := int64(100), int64(0)
 		// Hardcover returns one row per contribution, so a book crediting the
 		// author more than once appears more than once.
@@ -343,6 +344,7 @@ func (g *HCGetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq[
 			editions, err := hardcover.GetAuthorEditions(ctx, g.gql, authorID, limit, offset)
 			if err != nil {
 				Log(ctx).Warn("problem getting author editions", "err", err, "authorID", authorID)
+				yield(0, err)
 				return
 			}
 
@@ -368,7 +370,7 @@ func (g *HCGetter) GetAuthorBooks(ctx context.Context, authorID int64) iter.Seq[
 				if editionID == 0 {
 					continue // Shouldn't happen.
 				}
-				if !yield(editionID) {
+				if !yield(editionID, nil) {
 					return
 				}
 			}

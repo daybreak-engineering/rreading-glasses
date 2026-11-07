@@ -86,11 +86,11 @@ func TestIncrementalDenormalization(t *testing.T) {
 	}).AnyTimes()
 
 	getter.EXPECT().GetAuthorBooks(gomock.Any(), authorID).Return(
-		func(yield func(int64) bool) {
-			if !yield(englishEdition.ForeignID) {
+		func(yield func(int64, error) bool) {
+			if !yield(englishEdition.ForeignID, nil) {
 				return
 			}
-			if !yield(frenchEdition.ForeignID) {
+			if !yield(frenchEdition.ForeignID, nil) {
 				return
 			}
 		},
@@ -355,7 +355,7 @@ func TestSubtitles(t *testing.T) {
 		LinkItems: []seriesWorkLinkResource{},
 	}, nil)
 
-	getter.EXPECT().GetAuthorBooks(gomock.Any(), author.ForeignID).Return(iter.Seq[int64](func(func(int64) bool) {}))
+	getter.EXPECT().GetAuthorBooks(gomock.Any(), author.ForeignID).Return(iter.Seq2[int64, error](func(func(int64, error) bool) {}))
 
 	err = ctrl.denormalizeWorks(ctx, author.ForeignID, workDupe1.ForeignID, workDupe2.ForeignID, workUnique.ForeignID)
 	require.NoError(t, err)

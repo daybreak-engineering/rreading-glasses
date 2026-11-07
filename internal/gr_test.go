@@ -660,7 +660,8 @@ func TestGRIntegration(t *testing.T) {
 		t.Parallel()
 		iter := getter.GetAuthorBooks(t.Context(), 4178)
 		gotBook := false
-		for range iter {
+		for _, err := range iter {
+			require.NoError(t, err)
 			gotBook = true
 			break
 		}
