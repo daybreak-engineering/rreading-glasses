@@ -24,6 +24,24 @@ type cli struct {
 	Serve server `cmd:"" help:"Run an HTTP server."`
 
 	Bust cmd.Bust `cmd:"" help:"Bust cache entries."`
+
+	Backfill backfill `cmd:"" help:"Copy every cached author, work, book and series into the store."`
+}
+
+type backfill struct {
+	cmd.PGConfig
+	cmd.LogConfig
+}
+
+func (b *backfill) Run() error {
+	_ = b.LogConfig.Run()
+	ctx := context.Background()
+	store, err := internal.NewStore(ctx, b.DSN())
+	if err != nil {
+		return fmt.Errorf("setting up store: %w", err)
+	}
+	_, err = store.Backfill(ctx)
+	return err
 }
 
 type server struct {
@@ -51,10 +69,16 @@ func (s *server) Run() error {
 	}
 
 	ctx := context.Background()
-	cache, err := internal.NewCache(ctx, s.DSN(), cf, reg)
+	layered, err := internal.NewCache(ctx, s.DSN(), cf, reg)
 	if err != nil {
 		return fmt.Errorf("setting up cache: %w", err)
 	}
+	store, err := internal.NewStore(ctx, s.DSN())
+	if err != nil {
+		return fmt.Errorf("setting up store: %w", err)
+	}
+	cache := internal.NewStoreCache(layered, store)
+	go store.BackfillOnce(context.WithValue(ctx, middleware.RequestIDKey, "backfill"))
 
 	if len(s.HardcoverAuthFile) > 0 {
 		s.HardcoverAuth = string(bytes.TrimSpace(s.HardcoverAuthFile))
