@@ -70,3 +70,14 @@ def summarize_previews(previews: list[dict[str, Any]], limit: int = 50) -> list[
                 s[f"{key}_total"] = len(works)
         out.append(s)
     return out
+
+
+def trim_conflicts(conflicts: dict[str, Any], limit: int = 50) -> dict[str, Any]:
+    """Cap each conflict list at `limit` entries, keeping totals."""
+    out = dict(conflicts)
+    for key in ("with_files", "monitored"):
+        entries = conflicts.get(key) or []
+        out[key] = entries[:limit]
+        if len(entries) > limit:
+            out[f"{key}_total"] = len(entries)
+    return out

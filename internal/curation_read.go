@@ -161,6 +161,7 @@ func (s *Store) AuthorWorks(ctx context.Context, authorID int64, f AuthorWorksFi
 			wc.work_id IS NOT NULL, wc.status, wc.merged_into, wc.title, wc.edition_id, wc.primary_author_id,
 			COALESCE(wc.note, ''), wc.updated_at,
 			be.id, COALESCE(be.title, ''), COALESCE(be.language, ''), COALESCE(be.format, ''),
+			COALESCE(be.isbn13, ''), COALESCE(be.asin, ''), COALESCE(be.is_ebook, FALSE), COALESCE(be.listed, FALSE),
 			(SELECT count(*) FROM editions e WHERE e.work_id = c.work_id),
 			ARRAY(SELECT DISTINCT e.language FROM editions e
 				WHERE e.work_id = c.work_id AND e.listed AND e.language <> '' ORDER BY 1)
@@ -180,7 +181,8 @@ func (s *Store) AuthorWorks(ctx context.Context, authorID int64, f AuthorWorksFi
 		var be EditionSummary
 		err := r.Scan(&w.ID, &w.Title, &w.FullTitle, &w.ReleaseDate, &w.RatingCount, &w.InList, &w.Credit,
 			&hasCuration, &wc.Status, &wc.MergedInto, &wc.Title, &wc.EditionID, &wc.PrimaryAuthorID, &wc.Note, &wc.UpdatedAt,
-			&beID, &be.Title, &be.Language, &be.Format, &w.Editions, &w.Languages)
+			&beID, &be.Title, &be.Language, &be.Format, &be.Isbn13, &be.Asin, &be.IsEbook, &be.Listed,
+			&w.Editions, &w.Languages)
 		if hasCuration {
 			wc.ID = w.ID
 			w.Curation = &wc

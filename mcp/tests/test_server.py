@@ -214,3 +214,11 @@ async def test_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any)
     monkeypatch.delenv("BOOKSHELF_AUDIO_API_KEY")
     with pytest.raises(CurationError, match="BOOKSHELF_AUDIO_API_KEY"):
         Settings.from_env()
+
+
+async def test_conflict_lists_are_capped(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
+    admin.routes[("GET", f"/admin/authors/{AUTHOR}/preview")] = preview([WORK_WITH_FILE, WORK_MONITORED, WORK_PLAIN])
+    res = await call("preview_author", author_id=AUTHOR, limit=1)
+    assert len(res["library"]["with_files"]) == 1
+    assert res["library"]["with_files_total"] == 2
+    assert res["removed_total"] == 3

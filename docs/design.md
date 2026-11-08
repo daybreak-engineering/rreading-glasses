@@ -1,6 +1,6 @@
 # Permanent, curated metadata store
 
-Status: phases 0 and 1 deployed 2026-11-07; phase 2a in progress.
+Status: phases 0, 1 and 2a deployed; phase 2b in progress (off by default).
 
 ## Problem
 
@@ -114,8 +114,14 @@ always wins.
   lists, ISBN/ASIN lookups of B's editions resolve to A.
 - Hidden works stay fetchable by ID (`/work/<id>`), so hand-added books
   don't break; they only leave author lists and search.
-- Serving: author, work and book responses are built from the store with
-  curation applied, instead of from blobs.
+- Serving: curation is overlaid on the cached author and work responses in
+  the handler (`internal/serve.go`), behind `--serve-curated` (off by
+  default). With no curation touching an author the response is
+  byte-identical. Rules mode only removes works curation names, so a store
+  that lags the cache can't shrink a list. The cache keeps upstream data. A
+  curation failure returns an error rather than an uncurated list. Works
+  curation adds, and editions merged in, come from the store. Not done yet:
+  ISBN/ASIN and `/book/<id>` lookups of merged works, and search.
 
 Import the existing curation: `canon.tsv` / `match.py` output, the
 `keep-<aid>.txt` lists, `siblings.tsv`, the edition picks.
@@ -166,6 +172,16 @@ test).
 Split: **2a** curation tables, audit log, admin API, preview (nothing
 served changes); **2b** serve from the store with curation applied;
 **2c** rules and verdicts; MCP alongside 2a.
+
+### Changes Bookshelf can observe
+
+Upgrading or patching Bookshelf? Check these first.
+
+- **`IsEbook` (2026-11-08):** Hardcover's `eBook` format used to map to
+  false and now maps to true (`hcIsEbook`). It only changes as entries
+  refresh (editions 180d, works 90d, or a `?full=1` bust), so true and false
+  coexist for months, in cached responses and in `editions.is_ebook`. How
+  Bookshelf uses the field hasn't been verified.
 
 ### 3. Budgeted syncer
 

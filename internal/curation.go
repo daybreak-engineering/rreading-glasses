@@ -481,10 +481,12 @@ func optEnum(v json.RawMessage, allowed ...string) (*string, error) {
 
 // AuthorView is the author list we'd serve with curation applied.
 type AuthorView struct {
-	AuthorID int64            `json:"author_id"`
-	Mode     string           `json:"mode"`
-	Works    []int64          `json:"works"`
-	Excluded map[int64]string `json:"excluded"` // Candidate work -> why it's left out.
+	AuthorID int64  `json:"author_id"`
+	Mode     string `json:"mode"`
+	// MergedInto is set when the author itself is merged away.
+	MergedInto *int64           `json:"merged_into,omitempty"`
+	Works      []int64          `json:"works"`
+	Excluded   map[int64]string `json:"excluded"` // Candidate work -> why it's left out.
 }
 
 // EffectiveWorks applies curation to an author's list. Candidates are the
@@ -517,6 +519,7 @@ func effectiveWorks(ctx context.Context, q querier, authorID int64, mode string)
 		v.Mode = mode
 	}
 	if merged != nil {
+		v.MergedInto = merged
 		return v, nil // Served under the target author.
 	}
 

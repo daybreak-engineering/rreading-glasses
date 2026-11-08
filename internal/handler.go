@@ -34,6 +34,8 @@ import (
 type Handler struct {
 	ctrl *Controller
 	http *http.Client
+
+	curator Curator // Nil serves upstream data as is.
 }
 
 var _asin = regexp.MustCompile(`^B[A-Z0-9]{9}$`)
@@ -53,6 +55,11 @@ func NewHandler(ctrl *Controller) *Handler {
 		http: &http.Client{},
 	}
 	return h
+}
+
+// SetCurator applies curation to author and work responses.
+func (h *Handler) SetCurator(c Curator) {
+	h.curator = c
 }
 
 // NewMux registers a handler's routes on a new mux.
@@ -315,6 +322,14 @@ func (h *Handler) getWorkID(w http.ResponseWriter, r *http.Request) {
 		h.error(w, err)
 		return
 	}
+	if h.curator != nil {
+		// A failure is an error, not an uncurated response: uncurated lists
+		// would bring back everything curation removed.
+		if out, err = h.curator.CurateWork(ctx, workID, out); err != nil {
+			h.error(w, err)
+			return
+		}
+	}
 
 	if ttl > 0 {
 		cacheFor(w, ttl, false)
@@ -554,6 +569,13 @@ func (h *Handler) getAuthorID(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(author)
 		return
 
+	}
+
+	if h.curator != nil {
+		if out, err = h.curator.CurateAuthor(ctx, authorID, out); err != nil {
+			h.error(w, err)
+			return
+		}
 	}
 
 	if ttl > 0 {

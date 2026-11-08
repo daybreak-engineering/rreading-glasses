@@ -692,3 +692,13 @@ func TestGetAuthorBooksDedupes(t *testing.T) {
 	}
 	assert.Equal(t, []int64{10, 20}, got)
 }
+
+func TestHCIsEbook(t *testing.T) {
+	t.Parallel()
+	for format, want := range map[string]bool{
+		"ebook": true, "eBook": true, "EBOOK": true, "Kindle Edition": true, "kindle edition": true,
+		"Paperback": false, "Hardcover": false, "Audible.com": false, "": false,
+	} {
+		assert.Equal(t, want, hcIsEbook(format), format)
+	}
+}

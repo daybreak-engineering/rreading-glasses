@@ -12,7 +12,7 @@ from mcp_types import ToolAnnotations
 from pydantic import Field
 
 from .client import BOOKSHELF_INSTANCES, AdminClient, BookshelfClient, CurationError, Settings
-from .guard import library_conflicts, summarize_previews
+from .guard import library_conflicts, summarize_previews, trim_conflicts
 
 INSTRUCTIONS = """\
 Curate the book metadata rreading-glasses serves to Bookshelf (Hardcover IDs:
@@ -110,15 +110,17 @@ async def _apply(body: dict[str, Any], force: bool, dry_run: bool) -> dict[str, 
     conflicts = await library_conflicts(bookshelves(), previews)
     removes = any(p.get("removed") for p in previews)
     summary = summarize_previews(previews)
-    report = {"previews": summary, "library": conflicts}
+    trimmed = trim_conflicts(conflicts)
+    report = {"previews": summary, "library": trimmed}
 
     if dry_run:
         return {"dry_run": True, "result": _counts(dry), **report}
     if not force:
         if conflicts["with_files"]:
             raise CurationError(
-                "refused: would drop library books that have files (pass force=true to apply anyway): "
-                + json.dumps(conflicts["with_files"], separators=(",", ":"), ensure_ascii=False)
+                f"refused: would drop {len(conflicts['with_files'])} library books that have files "
+                "(pass force=true to apply anyway): "
+                + json.dumps(trimmed["with_files"], separators=(",", ":"), ensure_ascii=False)
             )
         missing = [n for n, _ in BOOKSHELF_INSTANCES if n not in conflicts["checked"]]
         if removes and missing:
@@ -130,7 +132,7 @@ async def _apply(body: dict[str, Any], force: bool, dry_run: bool) -> dict[str, 
     res = await admin().curate(body)
     out: dict[str, Any] = {"result": _counts(res), "previews": summary}
     if conflicts["with_files"] or conflicts["monitored"]:
-        out["library"] = conflicts
+        out["library"] = trimmed
     return out
 
 
@@ -225,7 +227,7 @@ async def preview_author(
     """Compare an author's served list with the curated one, and flag library books it would drop."""
     p = await admin().get(f"authors/{author_id}/preview", mode=mode)
     conflicts = await library_conflicts(bookshelves(), [p])
-    return {**summarize_previews([p], limit)[0], "library": conflicts}
+    return {**summarize_previews([p], limit)[0], "library": trim_conflicts(conflicts, limit)}
 
 
 # Writes

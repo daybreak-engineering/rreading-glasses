@@ -262,7 +262,7 @@ func mapHardcoverToWorkResource(ctx context.Context, edition hardcover.EditionIn
 		EditionInformation: edition.Edition_information, // TODO: Is this used anywhere?
 		Publisher:          edition.Publisher.Name,      // TODO: Ignore books without publishers?
 		ImageURL:           strings.ReplaceAll(string(work.Cached_image), `"`, ``),
-		IsEbook:            edition.Edition_format == "ebook" || edition.Edition_format == "Kindle Edition",
+		IsEbook:            hcIsEbook(edition.Edition_format),
 		NumPages:           edition.Pages,
 		RatingCount:        work.Ratings_count,
 		RatingSum:          int64(float64(work.Ratings_count) * work.Rating),
@@ -590,6 +590,12 @@ func (g *HCGetter) GetSeries(ctx context.Context, seriesID int64) (*SeriesResour
 	}
 
 	return seriesRsc, nil
+}
+
+// hcIsEbook reports whether a Hardcover edition format is an ebook. Formats
+// are free text and vary in case ("ebook", "eBook").
+func hcIsEbook(format string) bool {
+	return strings.EqualFold(format, "ebook") || strings.EqualFold(format, "Kindle Edition")
 }
 
 func hcReleaseDate(d string) string {

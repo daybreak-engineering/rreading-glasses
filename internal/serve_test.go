@@ -1,0 +1,233 @@
+package internal
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+)
+
+// authorBlob is a's cached response. seriesID links every work.
+func (f curationFixture) authorBlob(t *testing.T, seriesID int64, extra ...int64) (AuthorResource, []byte) {
+	t.Helper()
+	a := AuthorResource{ForeignID: f.a, Name: "Author A"}
+	sr := SeriesResource{ForeignID: seriesID, Title: "S"}
+	books := map[int64][]bookResource{
+		f.w[1]: {{ForeignID: f.w1Ed, Title: "One", Language: "eng"}},
+		f.w[2]: {{ForeignID: f.otherEd}},
+		f.w[3]: {{ForeignID: f.w3Ed}},
+	}
+	ids := append(append([]int64{}, f.w[1:]...), extra...)
+	for _, id := range ids {
+		a.Works = append(a.Works, workResource{
+			ForeignID: id, Title: "orig", FullTitle: "orig", ShortTitle: "orig", BestBookID: 7, Books: books[id],
+		})
+		sr.LinkItems = append(sr.LinkItems, seriesWorkLinkResource{ForeignWorkID: id})
+	}
+	a.Series = []SeriesResource{sr}
+	return a, mustJSON(t, a)
+}
+
+func decodeAuthor(t *testing.T, b []byte) (AuthorResource, map[int64]workResource) {
+	t.Helper()
+	var a AuthorResource
+	require.NoError(t, json.Unmarshal(b, &a))
+	m := map[int64]workResource{}
+	for _, w := range a.Works {
+		m[w.ForeignID] = w
+	}
+	return a, m
+}
+
+func editionIDs(w workResource) []int64 {
+	out := []int64{}
+	for _, b := range w.Books {
+		out = append(out, b.ForeignID)
+	}
+	return out
+}
+
+func TestCurateUncuratedIsByteIdentical(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newCurationFixture(t)
+
+	// BestBookID 7 isn't in Books; that alone mustn't count as a change.
+	_, blob := f.authorBlob(t, 1)
+	got, err := f.s.CurateAuthor(ctx, f.a, blob)
+	require.NoError(t, err)
+	assert.Equal(t, string(blob), string(got))
+
+	work := mustJSON(t, workResource{ForeignID: f.w[1], BestBookID: 7, Books: []bookResource{{ForeignID: f.w1Ed}}})
+	got, err = f.s.CurateWork(ctx, f.w[1], work)
+	require.NoError(t, err)
+	assert.Equal(t, string(work), string(got))
+}
+
+func TestCurateAuthorRules(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newCurationFixture(t)
+	unknown := testIDs(1)[0]
+
+	_, err := f.apply(t, fmt.Sprintf(`{
+		"works": [
+			{"id": %d, "status": "hidden"},
+			{"id": %d, "merged_into": %d},
+			{"id": %d, "title": "Better", "edition_id": %d},
+			{"id": %d, "status": "canon"}
+		]}`, f.w[2], f.w[3], f.w[1], f.w[1], f.w1Ed, f.unlisted))
+	require.NoError(t, err)
+
+	_, blob := f.authorBlob(t, 1, unknown)
+	got, err := f.s.CurateAuthor(ctx, f.a, blob)
+	require.NoError(t, err)
+	a, works := decodeAuthor(t, got)
+
+	assert.NotContains(t, works, f.w[2], "hidden")
+	assert.NotContains(t, works, f.w[3], "merged away")
+	assert.Contains(t, works, f.w[4], "uncurated stays")
+	assert.Contains(t, works, unknown, "rules mode never removes what the store hasn't seen")
+	assert.Contains(t, works, f.unlisted, "canon work added from the store")
+
+	w1 := works[f.w[1]]
+	assert.Equal(t, "Better", w1.Title)
+	assert.Equal(t, "Better", w1.FullTitle)
+	assert.Equal(t, f.w1Ed, w1.BestBookID)
+	assert.ElementsMatch(t, []int64{f.w1Ed, f.w3Ed}, editionIDs(w1), "merged work's editions served here")
+
+	links := []int64{}
+	for _, l := range a.Series[0].LinkItems {
+		links = append(links, l.ForeignWorkID)
+	}
+	assert.NotContains(t, links, f.w[2])
+	assert.NotContains(t, links, f.w[3])
+	assert.Contains(t, links, f.w[1])
+}
+
+func TestCurateAuthorAllowlist(t *testing.T) {
+	t.Parallel()
+	f := newCurationFixture(t)
+	unknown := testIDs(1)[0]
+
+	_, err := f.apply(t, fmt.Sprintf(`{
+		"authors": [{"id": %d, "mode": "allowlist"}],
+		"works": [{"id": %d, "status": "canon"}]}`, f.a, f.w[1]))
+	require.NoError(t, err)
+
+	_, blob := f.authorBlob(t, 1, unknown)
+	got, err := f.s.CurateAuthor(t.Context(), f.a, blob)
+	require.NoError(t, err)
+	a, works := decodeAuthor(t, got)
+	assert.Len(t, works, 1)
+	assert.Contains(t, works, f.w[1])
+	assert.Len(t, a.Series[0].LinkItems, 1)
+}
+
+func TestCurateMergedAuthorIsEmpty(t *testing.T) {
+	t.Parallel()
+	f := newCurationFixture(t)
+
+	_, err := f.apply(t, fmt.Sprintf(`{"authors": [{"id": %d, "merged_into": %d}]}`, f.a, f.b))
+	require.NoError(t, err)
+
+	_, blob := f.authorBlob(t, 1)
+	got, err := f.s.CurateAuthor(t.Context(), f.a, blob)
+	require.NoError(t, err)
+	_, works := decodeAuthor(t, got)
+	assert.Empty(t, works)
+}
+
+func TestCurateWorkEditions(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newCurationFixture(t)
+	second := f.otherEd + 5000
+
+	blob := mustJSON(t, workResource{ForeignID: f.w[1], BestBookID: f.w1Ed, Books: []bookResource{
+		{ForeignID: f.w1Ed, Language: "eng"}, {ForeignID: second, Language: "rus"},
+	}})
+	s := f.s
+	s.Ingest(ctx, BookKey(second), mustJSON(t, workResource{ForeignID: f.w[1], Books: []bookResource{{ForeignID: second}}}))
+
+	_, err := f.apply(t, fmt.Sprintf(`{"editions": [
+		{"id": %d, "hidden": true},
+		{"id": %d, "language": "eng"}]}`, f.w1Ed, second))
+	require.NoError(t, err)
+
+	got, err := s.CurateWork(ctx, f.w[1], blob)
+	require.NoError(t, err)
+	var w workResource
+	require.NoError(t, json.Unmarshal(got, &w))
+	assert.Equal(t, []int64{second}, editionIDs(w))
+	assert.Equal(t, "eng", w.Books[0].Language)
+	assert.Equal(t, second, w.BestBookID, "best edition was hidden")
+
+	// Hiding every edition keeps them rather than serving none.
+	_, err = f.apply(t, fmt.Sprintf(`{"editions": [{"id": %d, "hidden": true}]}`, second))
+	require.NoError(t, err)
+	got, err = s.CurateWork(ctx, f.w[1], blob)
+	require.NoError(t, err)
+	assert.Equal(t, string(blob), string(got))
+
+	// Hidden works stay fetchable.
+	_, err = f.apply(t, fmt.Sprintf(`{"works": [{"id": %d, "status": "hidden", "title": "Still here"}]}`, f.w[1]))
+	require.NoError(t, err)
+	got, err = s.CurateWork(ctx, f.w[1], blob)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(got, &w))
+	assert.Equal(t, "Still here", w.Title)
+}
+
+type fakeCurator struct{ err error }
+
+func (f fakeCurator) CurateAuthor(_ context.Context, _ int64, _ []byte) ([]byte, error) {
+	return []byte(`{"curated":true}`), f.err
+}
+
+func (f fakeCurator) CurateWork(_ context.Context, _ int64, _ []byte) ([]byte, error) {
+	return []byte(`{"curated":true}`), f.err
+}
+
+func TestHandlerCurator(t *testing.T) {
+	t.Parallel()
+	cache := newMemoryCache()
+	getter := NewMockgetter(gomock.NewController(t))
+	ctrl, err := NewController(cache, getter, nil, nil)
+	require.NoError(t, err)
+
+	raw := mustJSON(t, workResource{ForeignID: 5, Title: "upstream"})
+	cache.Set(t.Context(), WorkKey(5), raw, _staleTTL*100)
+
+	get := func(h *Handler) (int, string) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/work/5", nil)
+		h.getWorkID(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	code, body := get(NewHandler(ctrl))
+	assert.Equal(t, http.StatusOK, code)
+	assert.Equal(t, string(raw), body, "no curator serves upstream data")
+
+	h := NewHandler(ctrl)
+	h.SetCurator(fakeCurator{})
+	_, body = get(h)
+	assert.JSONEq(t, `{"curated":true}`, body)
+
+	cached, ok := cache.Get(t.Context(), WorkKey(5))
+	require.True(t, ok)
+	assert.Equal(t, string(raw), string(cached), "the cache keeps upstream data")
+
+	h.SetCurator(fakeCurator{err: errors.New("db down")})
+	code, body = get(h)
+	assert.Equal(t, http.StatusInternalServerError, code, "failing beats serving uncurated lists")
+	assert.NotContains(t, body, "upstream")
+}

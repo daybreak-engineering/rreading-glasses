@@ -138,6 +138,15 @@ func TestCurationAllowlistAndPreview(t *testing.T) {
 	d, err := f.s.AuthorWorks(ctx, f.a, AuthorWorksFilter{Status: "served"})
 	require.NoError(t, err)
 	assert.Equal(t, 2, d.Total)
+
+	// The best edition carries the same fields as the work's edition list.
+	_, err = f.apply(t, fmt.Sprintf(`{"works": [{"id": %d, "edition_id": %d}]}`, f.w[1], f.w1Ed))
+	require.NoError(t, err)
+	d, err = f.s.AuthorWorks(ctx, f.a, AuthorWorksFilter{Query: "Work 1"})
+	require.NoError(t, err)
+	require.Len(t, d.Works, 1)
+	require.NotNil(t, d.Works[0].BestEdition)
+	assert.True(t, d.Works[0].BestEdition.Listed)
 }
 
 func TestCurationAuthorMerge(t *testing.T) {
