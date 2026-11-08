@@ -53,15 +53,24 @@ type CurationRequest struct {
 	Authors  []Patch `json:"authors"`
 	Works    []Patch `json:"works"`
 	Editions []Patch `json:"editions"`
+	// DryRun validates and previews the affected authors, then rolls back.
+	DryRun bool `json:"dry_run"`
 }
 
 // CurationResult counts rows that changed.
 type CurationResult struct {
-	Authors   int `json:"authors"`
-	Works     int `json:"works"`
-	Editions  int `json:"editions"`
-	Unchanged int `json:"unchanged"`
+	Authors   int       `json:"authors"`
+	Works     int       `json:"works"`
+	Editions  int       `json:"editions"`
+	Unchanged int       `json:"unchanged"`
+	DryRun    bool      `json:"dry_run"`
+	Previews  []Preview `json:"previews,omitempty"` // Dry runs only.
 }
+
+// _maxPreviews caps the authors a dry run previews.
+const _maxPreviews = 100
+
+var errDryRun = errors.New("dry run")
 
 func badRequest(format string, args ...any) error {
 	return errors.Join(errBadRequest, fmt.Errorf(format, args...))
@@ -93,9 +102,64 @@ func (s *Store) ApplyCuration(ctx context.Context, req CurationRequest) (Curatio
 			}
 			count(&res.Editions, &res.Unchanged, changed)
 		}
-		return checkMergeChains(ctx, tx)
+		if err := checkMergeChains(ctx, tx); err != nil {
+			return err
+		}
+		if !req.DryRun {
+			return nil
+		}
+		authors, err := affectedAuthors(ctx, tx, req)
+		if err != nil {
+			return err
+		}
+		for _, id := range authors {
+			p, err := previewAuthor(ctx, tx, id, "")
+			if err != nil {
+				return err
+			}
+			res.Previews = append(res.Previews, p)
+		}
+		return errDryRun // Roll back.
 	})
+	if errors.Is(err, errDryRun) {
+		res.DryRun, err = true, nil
+	}
 	return res, err
+}
+
+// affectedAuthors lists authors whose curated list a request may change:
+// patched authors and their merge targets, and authors listed on, credited
+// on or assigned patched works and their merge targets. Run after the
+// patches, inside their transaction.
+func affectedAuthors(ctx context.Context, tx pgx.Tx, req CurationRequest) ([]int64, error) {
+	var authors, works []int64
+	for _, p := range req.Authors {
+		if id, err := patchID(p); err == nil {
+			authors = append(authors, id)
+		}
+	}
+	for _, p := range req.Works {
+		if id, err := patchID(p); err == nil {
+			works = append(works, id)
+		}
+	}
+	rows, err := tx.Query(ctx, `WITH w AS (
+			SELECT unnest($2::bigint[]) AS id
+			UNION SELECT merged_into FROM work_curation WHERE work_id = ANY($2) AND merged_into IS NOT NULL
+		), a AS (
+			SELECT unnest($1::bigint[]) AS id
+			UNION SELECT author_id FROM author_works WHERE work_id IN (SELECT id FROM w)
+			UNION SELECT author_id FROM work_authors WHERE work_id IN (SELECT id FROM w)
+			UNION SELECT primary_author_id FROM work_curation
+				WHERE work_id IN (SELECT id FROM w) AND primary_author_id IS NOT NULL
+		)
+		SELECT id FROM a
+		UNION SELECT merged_into FROM author_curation WHERE author_id IN (SELECT id FROM a) AND merged_into IS NOT NULL
+		ORDER BY 1 LIMIT $3`, authors, works, _maxPreviews)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[int64])
 }
 
 func count(changed, unchanged *int, ok bool) {
@@ -430,19 +494,34 @@ type AuthorView struct {
 // hidden ones; allowlist mode keeps only canon works. Merged works are
 // replaced by their target.
 func (s *Store) EffectiveWorks(ctx context.Context, authorID int64) (AuthorView, error) {
+	return effectiveWorks(ctx, s.db, authorID, "")
+}
+
+// querier is a pool or a transaction.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// effectiveWorks is EffectiveWorks on q; a non-empty mode overrides the
+// author's.
+func effectiveWorks(ctx context.Context, q querier, authorID int64, mode string) (AuthorView, error) {
 	v := AuthorView{AuthorID: authorID, Mode: "rules", Works: []int64{}, Excluded: map[int64]string{}}
 
 	var merged *int64
-	err := s.db.QueryRow(ctx, `SELECT mode, merged_into FROM author_curation WHERE author_id = $1`, authorID).Scan(&v.Mode, &merged)
+	err := q.QueryRow(ctx, `SELECT mode, merged_into FROM author_curation WHERE author_id = $1`, authorID).Scan(&v.Mode, &merged)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return v, err
+	}
+	if mode != "" {
+		v.Mode = mode
 	}
 	if merged != nil {
 		return v, nil // Served under the target author.
 	}
 
 	ids := map[int64]bool{authorID: true}
-	rows, err := s.db.Query(ctx, `SELECT author_id FROM author_curation WHERE merged_into = $1`, authorID)
+	rows, err := q.Query(ctx, `SELECT author_id FROM author_curation WHERE merged_into = $1`, authorID)
 	if err != nil {
 		return v, err
 	}
@@ -461,7 +540,7 @@ func (s *Store) EffectiveWorks(ctx context.Context, authorID int64) (AuthorView,
 		authorIDs = append(authorIDs, id)
 	}
 
-	rows, err = s.db.Query(ctx, `WITH cand AS (
+	rows, err = q.Query(ctx, `WITH cand AS (
 			SELECT work_id, TRUE AS listed FROM author_works WHERE author_id = ANY($1)
 			UNION SELECT work_id, FALSE FROM work_authors WHERE author_id = ANY($1)
 			UNION SELECT work_id, FALSE FROM work_curation WHERE primary_author_id = ANY($1)

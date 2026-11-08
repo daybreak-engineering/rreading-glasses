@@ -121,7 +121,7 @@ func TestCurationAllowlistAndPreview(t *testing.T) {
 	assert.Equal(t, []int64{f.w[1], f.unlisted}, v.Works)
 	assert.Equal(t, "not canon", v.Excluded[f.w[2]])
 
-	p, err := f.s.PreviewAuthor(ctx, f.a)
+	p, err := f.s.PreviewAuthor(ctx, f.a, "")
 	require.NoError(t, err)
 	assert.Equal(t, 5, p.Served)
 	assert.Equal(t, 2, p.Curated)
@@ -279,4 +279,37 @@ func TestAdminAPI(t *testing.T) {
 	code, body = do("GET", fmt.Sprintf("/admin/log?kind=work&id=%d", f.w[2]), "secret", "")
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Len(t, body["list"], 1)
+}
+
+func TestCurationDryRun(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newCurationFixture(t)
+
+	res, err := f.apply(t, fmt.Sprintf(`{"dry_run": true, "works": [{"id": %d, "status": "hidden"}]}`, f.w[2]))
+	require.NoError(t, err)
+	assert.True(t, res.DryRun)
+	assert.Equal(t, 1, res.Works)
+	require.Len(t, res.Previews, 2, "a lists it, b is credited")
+	byAuthor := map[int64]Preview{}
+	for _, p := range res.Previews {
+		byAuthor[p.AuthorID] = p
+	}
+	assert.Equal(t, []PreviewWork{{ID: f.w[2], Title: "Work 2", Reason: "hidden"}}, byAuthor[f.a].Removed)
+	assert.Equal(t, "Author A", byAuthor[f.a].Name)
+
+	d, err := f.s.Work(ctx, f.w[2])
+	require.NoError(t, err)
+	assert.Nil(t, d.Curation, "rolled back")
+	log, err := f.s.CurationLog(ctx, "work", f.w[2], 10)
+	require.NoError(t, err)
+	assert.Empty(t, log)
+
+	// Previewing a mode without switching to it.
+	p, err := f.s.PreviewAuthor(ctx, f.a, "allowlist")
+	require.NoError(t, err)
+	assert.Equal(t, "allowlist", p.Mode)
+	assert.Len(t, p.Removed, 5)
+	_, err = f.s.PreviewAuthor(ctx, 1, "")
+	assert.ErrorIs(t, err, errNotFound)
 }

@@ -90,7 +90,12 @@ func (a *admin) preview(w http.ResponseWriter, r *http.Request) {
 		adminError(w, err)
 		return
 	}
-	res, err := a.store.PreviewAuthor(r.Context(), id)
+	mode := r.FormValue("mode")
+	if mode != "" && mode != "rules" && mode != "allowlist" {
+		adminError(w, badRequest("mode must be rules or allowlist"))
+		return
+	}
+	res, err := a.store.PreviewAuthor(r.Context(), id, mode)
 	adminJSON(w, res, err)
 }
 
@@ -169,7 +174,7 @@ func (a *admin) curate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := a.store.ApplyCuration(r.Context(), req)
-	if err == nil {
+	if err == nil && !res.DryRun {
 		Log(r.Context()).Info("applied curation", "source", req.Source,
 			"authors", res.Authors, "works", res.Works, "editions", res.Editions)
 	}

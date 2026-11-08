@@ -361,6 +361,7 @@ func (s *Store) CurationLog(ctx context.Context, kind string, id int64, limit in
 // Preview compares today's served list with the curated one.
 type Preview struct {
 	AuthorID int64         `json:"author_id"`
+	Name     string        `json:"name"`
 	Mode     string        `json:"mode"`
 	Served   int           `json:"served"`  // Today's list size.
 	Curated  int           `json:"curated"` // Size with curation applied.
@@ -376,16 +377,26 @@ type PreviewWork struct {
 }
 
 // PreviewAuthor reports which works curation would remove from or add to an
-// author's served list.
-func (s *Store) PreviewAuthor(ctx context.Context, authorID int64) (Preview, error) {
+// author's served list. A non-empty mode previews that mode instead.
+func (s *Store) PreviewAuthor(ctx context.Context, authorID int64, mode string) (Preview, error) {
+	return previewAuthor(ctx, s.db, authorID, mode)
+}
+
+func previewAuthor(ctx context.Context, q querier, authorID int64, mode string) (Preview, error) {
 	p := Preview{AuthorID: authorID, Removed: []PreviewWork{}, Added: []PreviewWork{}}
-	view, err := s.EffectiveWorks(ctx, authorID)
+	view, err := effectiveWorks(ctx, q, authorID, mode)
 	if err != nil {
 		return p, err
 	}
 	p.Mode, p.Curated = view.Mode, len(view.Works)
+	if err := q.QueryRow(ctx, `SELECT name FROM authors WHERE id = $1`, authorID).Scan(&p.Name); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return p, errNotFound
+		}
+		return p, err
+	}
 
-	rows, err := s.db.Query(ctx, `SELECT x.id, COALESCE(w.title, ''), x.id = ANY($2) AS curated,
+	rows, err := q.Query(ctx, `SELECT x.id, COALESCE(w.title, ''), x.id = ANY($2) AS curated,
 			EXISTS (SELECT 1 FROM author_works aw WHERE aw.author_id = $1 AND aw.work_id = x.id) AS served
 		FROM (SELECT work_id AS id FROM author_works WHERE author_id = $1 UNION SELECT unnest($2::bigint[])) x
 		LEFT JOIN works w ON w.id = x.id

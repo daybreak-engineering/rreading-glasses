@@ -150,7 +150,13 @@ POST /admin/curation                              {source, authors, works, editi
 `POST /admin/curation` takes partial patches keyed by `id`: absent fields
 are kept, null or `""` clears. The whole request is one transaction;
 merge chains, self-merges, unknown IDs and editions from unrelated works
-are rejected. No-op patches don't log. Canon adds a work for every
+are rejected. No-op patches don't log. `dry_run: true` applies the patches,
+returns previews (served vs curated) for every affected author, and rolls
+back. `GET .../preview?mode=allowlist` previews a mode without switching.
+
+The MCP (`mcp/`, Python, `rg-mcp`) dry-runs every write, matches removed
+works against the Bookshelf library (read-only) and refuses when a book
+with files would drop, unless forced. Canon adds a work for every
 credited author; `primary_author_id` restricts it to one.
 
 Open: whether Bookshelf follows a work whose ForeignId was merged (needs a
