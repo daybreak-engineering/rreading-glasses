@@ -28,6 +28,7 @@ key's 50k/day cap was hit on 2026-11-07.
    wins over upstream, and survives every refresh.
 3. Hardcover spend is bounded and predictable.
 4. Bookshelf keeps working unchanged: the Readarr-compatible API stays.
+   Two instances (ebook and audio) read from this server.
 
 Non-goals: the Goodreads build (`cmd/rggr`), staying rebaseable on upstream
 (dropped 2026-11-07).
@@ -155,8 +156,8 @@ returns previews (served vs curated) for every affected author, and rolls
 back. `GET .../preview?mode=allowlist` previews a mode without switching.
 
 The MCP (`mcp/`, Python, `rg-mcp`) dry-runs every write, matches removed
-works against the Bookshelf library (read-only) and refuses when a book
-with files would drop, unless forced. Canon adds a work for every
+works against both Bookshelf libraries (ebook and audio, read-only) and
+refuses when a book with files would drop, unless forced. Canon adds a work for every
 credited author; `primary_author_id` restricts it to one.
 
 Open: whether Bookshelf follows a work whose ForeignId was merged (needs a

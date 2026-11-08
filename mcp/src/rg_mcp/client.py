@@ -20,12 +20,22 @@ class CurationError(Exception):
     """Raised for API failures and refused writes."""
 
 
+# Bookshelf instances fed by this server: (name, env prefix).
+BOOKSHELF_INSTANCES = (("ebook", "BOOKSHELF"), ("audio", "BOOKSHELF_AUDIO"))
+
+
+@dataclass(frozen=True)
+class Bookshelf:
+    name: str
+    url: str
+    api_key: str
+
+
 @dataclass(frozen=True)
 class Settings:
     admin_url: str
     admin_token: str
-    bookshelf_url: str = ""
-    bookshelf_api_key: str = ""
+    bookshelves: tuple[Bookshelf, ...] = ()
     read_only: bool = False
     timeout: float = 120.0
 
@@ -38,11 +48,18 @@ class Settings:
             token = Path(token_file).expanduser().read_text().strip()
         if not url or not token:
             raise CurationError("RG_ADMIN_URL and RG_ADMIN_TOKEN (or RG_ADMIN_TOKEN_FILE) must be set")
+        bookshelves = []
+        for name, prefix in BOOKSHELF_INSTANCES:
+            bs_url = os.environ.get(f"{prefix}_URL", "").strip().rstrip("/")
+            key = os.environ.get(f"{prefix}_API_KEY", "").strip()
+            if bool(bs_url) != bool(key):
+                raise CurationError(f"set both {prefix}_URL and {prefix}_API_KEY, or neither")
+            if bs_url:
+                bookshelves.append(Bookshelf(name, bs_url, key))
         return cls(
             admin_url=url.rstrip("/"),
             admin_token=token,
-            bookshelf_url=os.environ.get("BOOKSHELF_URL", "").strip().rstrip("/"),
-            bookshelf_api_key=os.environ.get("BOOKSHELF_API_KEY", "").strip(),
+            bookshelves=tuple(bookshelves),
             read_only=os.environ.get("RG_READ_ONLY", "").lower() in _TRUE,
             timeout=float(os.environ.get("RG_TIMEOUT", "120")),
         )
@@ -107,13 +124,9 @@ class AdminClient(_Client):
 class BookshelfClient(_Client):
     """Read-only Bookshelf v1 API, used to check curation against the library."""
 
-    def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
-        super().__init__(
-            settings.bookshelf_url,
-            {"X-Api-Key": settings.bookshelf_api_key, "Accept": "application/json"},
-            settings.timeout,
-            transport,
-        )
+    def __init__(self, bs: Bookshelf, timeout: float = 120.0, transport: httpx.AsyncBaseTransport | None = None):
+        self.name = bs.name
+        super().__init__(bs.url, {"X-Api-Key": bs.api_key, "Accept": "application/json"}, timeout, transport)
 
     async def get(self, path: str, **params: Any) -> Any:
         return await self.request("GET", f"/api/v1/{path.lstrip('/')}", params=params)

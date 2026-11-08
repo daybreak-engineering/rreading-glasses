@@ -11,7 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from .client import AdminClient, BookshelfClient, CurationError, Settings
+from .client import BOOKSHELF_INSTANCES, AdminClient, BookshelfClient, CurationError, Settings
 from .guard import library_conflicts, summarize_previews
 
 INSTRUCTIONS = """\
@@ -32,9 +32,10 @@ Flow: `search_authors` -> `get_author_works` (filter by status) -> `get_work`
 for editions -> write tools -> `get_curation_log` to audit.
 `preview_author(mode="allowlist")` shows what switching would drop.
 
-Safety: every write is dry-run first and checked against the Bookshelf library.
-It is refused if it would drop a library book that has files, unless
-`force=true`. Bookshelf deletes books that leave an author's list.
+Safety: every write is dry-run first and checked against both Bookshelf
+libraries (ebook and audio). It is refused if it would drop a library book
+that has files, unless `force=true`. Bookshelf deletes books that leave an
+author's list.
 Use `dry_run=true` on any write tool to see the effect without applying it.
 """
 
@@ -42,8 +43,7 @@ mcp = MCPServer("rreading-glasses", instructions=INSTRUCTIONS)
 
 _settings: Settings | None = None
 _admin: AdminClient | None = None
-_bookshelf: BookshelfClient | None = None
-_bookshelf_set = False
+_bookshelves: list[BookshelfClient] | None = None
 
 
 def settings() -> Settings:
@@ -60,13 +60,12 @@ def admin() -> AdminClient:
     return _admin
 
 
-def bookshelf() -> BookshelfClient | None:
-    global _bookshelf, _bookshelf_set
-    if not _bookshelf_set:
+def bookshelves() -> list[BookshelfClient]:
+    global _bookshelves
+    if _bookshelves is None:
         s = settings()
-        _bookshelf = BookshelfClient(s) if s.bookshelf_url and s.bookshelf_api_key else None
-        _bookshelf_set = True
-    return _bookshelf
+        _bookshelves = [BookshelfClient(bs, s.timeout) for bs in s.bookshelves]
+    return _bookshelves
 
 
 def tool(**kwargs: Any) -> Any:
@@ -108,7 +107,7 @@ async def _apply(body: dict[str, Any], force: bool, dry_run: bool) -> dict[str, 
 
     dry = await admin().curate({**body, "dry_run": True})
     previews = dry.get("previews") or []
-    conflicts = await library_conflicts(bookshelf(), previews)
+    conflicts = await library_conflicts(bookshelves(), previews)
     removes = any(p.get("removed") for p in previews)
     summary = summarize_previews(previews)
     report = {"previews": summary, "library": conflicts}
@@ -121,10 +120,11 @@ async def _apply(body: dict[str, Any], force: bool, dry_run: bool) -> dict[str, 
                 "refused: would drop library books that have files (pass force=true to apply anyway): "
                 + json.dumps(conflicts["with_files"], separators=(",", ":"), ensure_ascii=False)
             )
-        if removes and not conflicts["checked"]:
+        missing = [n for n, _ in BOOKSHELF_INSTANCES if n not in conflicts["checked"]]
+        if removes and missing:
             raise CurationError(
-                "refused: this removes works from author lists and BOOKSHELF_URL/BOOKSHELF_API_KEY aren't set, "
-                "so the library can't be checked (pass force=true to apply anyway)"
+                f"refused: this removes works from author lists and the {', '.join(missing)} Bookshelf isn't "
+                "configured, so its library can't be checked (pass force=true to apply anyway)"
             )
 
     res = await admin().curate(body)
@@ -224,7 +224,7 @@ async def preview_author(
 ) -> Any:
     """Compare an author's served list with the curated one, and flag library books it would drop."""
     p = await admin().get(f"authors/{author_id}/preview", mode=mode)
-    conflicts = await library_conflicts(bookshelf(), [p])
+    conflicts = await library_conflicts(bookshelves(), [p])
     return {**summarize_previews([p], limit)[0], "library": conflicts}
 
 

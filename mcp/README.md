@@ -12,22 +12,25 @@ after.
 | `RG_ADMIN_URL`        | yes      | Admin API base, e.g. `https://rg-admin.lan`          |
 | `RG_ADMIN_TOKEN`      | yes*     | Bearer token (the server's `ADMIN_TOKEN`)            |
 | `RG_ADMIN_TOKEN_FILE` | yes*     | File holding the token, instead of `RG_ADMIN_TOKEN`  |
-| `BOOKSHELF_URL`       | no       | Bookshelf base URL, for the library check            |
-| `BOOKSHELF_API_KEY`   | no       | Bookshelf API key                                    |
+| `BOOKSHELF_URL`       | no       | Ebook Bookshelf base URL, for the library check      |
+| `BOOKSHELF_API_KEY`   | no       | Ebook Bookshelf API key                              |
+| `BOOKSHELF_AUDIO_URL` | no       | Audiobook Bookshelf base URL                         |
+| `BOOKSHELF_AUDIO_API_KEY` | no   | Audiobook Bookshelf API key                      |
 | `RG_READ_ONLY`        | no       | `true` allows only reads and dry runs                |
 | `RG_TIMEOUT`          | no       | Request timeout in seconds (default 120)             |
 
 ## Library check
 
-Bookshelf deletes books that drop out of an author's list on the next author
-refresh. Every write is first sent as a dry run, which returns previews of the
-affected authors. Removed works are matched against the Bookshelf library by
-`foreignAuthorId` / `foreignBookId`:
+Both Bookshelf instances (ebook and audio) take their metadata from the same
+rreading-glasses server, and each deletes books that drop out of an author's
+list on its next author refresh. Every write is first sent as a dry run,
+which returns previews of the affected authors. Removed works are matched
+against each library by `foreignAuthorId` / `foreignBookId`:
 
 - a removed book **with files** refuses the write unless `force=true`;
 - a removed book that is only monitored is reported as a warning;
-- without `BOOKSHELF_URL`/`BOOKSHELF_API_KEY`, any write that removes works
-  needs `force=true`.
+- if either instance isn't configured, any write that removes works needs
+  `force=true`.
 
 Bookshelf is only read, never written.
 
@@ -39,6 +42,8 @@ claude mcp add rreading-glasses \
   --env RG_ADMIN_TOKEN_FILE=/path/to/token \
   --env BOOKSHELF_URL=http://bookshelf.lan \
   --env BOOKSHELF_API_KEY=your-key \
+  --env BOOKSHELF_AUDIO_URL=http://bookshelf-audio.lan \
+  --env BOOKSHELF_AUDIO_API_KEY=your-audio-key \
   -- uv --directory /path/to/rreading-glasses/mcp run rg-mcp
 ```
 

@@ -1,4 +1,4 @@
-"""Checks curation previews against the Bookshelf library.
+"""Checks curation previews against the Bookshelf libraries (ebook and audio).
 
 Bookshelf deletes library books that drop out of an author's list on the next
 author refresh, files included in its bookkeeping. A curation change that
@@ -12,23 +12,28 @@ from typing import Any
 from .client import BookshelfClient
 
 
-async def library_conflicts(bs: BookshelfClient | None, previews: list[dict[str, Any]]) -> dict[str, Any]:
-    """Find removed works that are books in the Bookshelf library.
+async def library_conflicts(clients: list[BookshelfClient], previews: list[dict[str, Any]]) -> dict[str, Any]:
+    """Find removed works that are books in any Bookshelf library.
 
-    Returns {"checked": bool, "with_files": [...], "monitored": [...]}; each
-    entry names the author, work, Bookshelf book id and file count.
+    Returns {"checked": [instance names], "with_files": [...], "monitored": [...]};
+    each entry names the instance, author, work, Bookshelf book id and file count.
     """
     removing = [p for p in previews if p.get("removed")]
-    out: dict[str, Any] = {"checked": bs is not None, "with_files": [], "monitored": []}
-    if bs is None or not removing:
+    out: dict[str, Any] = {"checked": [c.name for c in clients], "with_files": [], "monitored": []}
+    if not removing:
         return out
+    for bs in clients:
+        await _check(bs, removing, out)
+    return out
 
+
+async def _check(bs: BookshelfClient, removing: list[dict[str, Any]], out: dict[str, Any]) -> None:
     authors = await bs.get("author") or []
     by_foreign = {str(a.get("foreignAuthorId")): a for a in authors}
     for p in removing:
         author = by_foreign.get(str(p["author_id"]))
         if author is None:
-            continue  # Not in the library.
+            continue  # Not in this library.
         books = await bs.get("book", authorId=author["id"]) or []
         by_work = {str(b.get("foreignBookId")): b for b in books}
         for w in p["removed"]:
@@ -37,6 +42,7 @@ async def library_conflicts(bs: BookshelfClient | None, previews: list[dict[str,
                 continue
             files = (book.get("statistics") or {}).get("bookFileCount", 0)
             entry = {
+                "instance": bs.name,
                 "author_id": p["author_id"],
                 "author": p.get("name") or author.get("authorName"),
                 "work_id": w["id"],
@@ -50,7 +56,6 @@ async def library_conflicts(bs: BookshelfClient | None, previews: list[dict[str,
                 out["with_files"].append(entry)
             elif entry["monitored"]:
                 out["monitored"].append(entry)
-    return out
 
 
 def summarize_previews(previews: list[dict[str, Any]], limit: int = 50) -> list[dict[str, Any]]:

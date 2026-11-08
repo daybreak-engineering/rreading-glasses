@@ -6,7 +6,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 
 from rg_mcp import server
-from rg_mcp.client import AdminClient, BookshelfClient, Settings
+from rg_mcp.client import AdminClient, Bookshelf, BookshelfClient, CurationError, Settings
 
 AUTHOR = 100
 WORK_WITH_FILE = 1
@@ -59,30 +59,51 @@ def curation_handler(removed: list[int]):
     return handle
 
 
+EBOOK = Bookshelf("ebook", "http://bs", "k")
+AUDIO = Bookshelf("audio", "http://bs-audio", "ka")
+SETTINGS = Settings(admin_url="http://rg", admin_token="tok", bookshelves=(EBOOK, AUDIO))
+
+
 @pytest.fixture
 def admin(monkeypatch: pytest.MonkeyPatch) -> Fake:
     f = Fake(("Authorization", "Bearer tok"))
-    s = Settings(admin_url="http://rg", admin_token="tok", bookshelf_url="http://bs", bookshelf_api_key="k")
-    monkeypatch.setattr(server, "_settings", s)
-    monkeypatch.setattr(server, "_admin", AdminClient(s, transport=httpx.MockTransport(f)))
+    monkeypatch.setattr(server, "_settings", SETTINGS)
+    monkeypatch.setattr(server, "_admin", AdminClient(SETTINGS, transport=httpx.MockTransport(f)))
+    return f
+
+
+def fake_bookshelf(key: str, bs_author_id: int, books: list[dict[str, Any]]) -> Fake:
+    f = Fake(("X-Api-Key", key))
+    f.routes[("GET", "/api/v1/author")] = [{"id": bs_author_id, "foreignAuthorId": str(AUTHOR), "authorName": "Author"}]
+    f.routes[("GET", "/api/v1/book")] = lambda p, _: books if p == {"authorId": str(bs_author_id)} else []
     return f
 
 
 @pytest.fixture
-def bookshelf(monkeypatch: pytest.MonkeyPatch, admin: Fake) -> Fake:
-    f = Fake(("X-Api-Key", "k"))
-    f.routes[("GET", "/api/v1/author")] = [{"id": 7, "foreignAuthorId": str(AUTHOR), "authorName": "Author"}]
-    f.routes[("GET", "/api/v1/book")] = lambda p, _: (
+def bookshelf(monkeypatch: pytest.MonkeyPatch, admin: Fake) -> tuple[Fake, Fake]:
+    ebook = fake_bookshelf(
+        "k",
+        7,
         [
             {"id": 70, "foreignBookId": str(WORK_WITH_FILE), "monitored": True, "statistics": {"bookFileCount": 1}},
             {"id": 71, "foreignBookId": str(WORK_MONITORED), "monitored": True, "statistics": {"bookFileCount": 0}},
-        ]
-        if p == {"authorId": "7"}
-        else []
+        ],
     )
-    monkeypatch.setattr(server, "_bookshelf", BookshelfClient(server.settings(), transport=httpx.MockTransport(f)))
-    monkeypatch.setattr(server, "_bookshelf_set", True)
-    return f
+    # The audiobook of WORK_PLAIN has a file; the ebook library doesn't have it.
+    audio = fake_bookshelf(
+        "ka",
+        8,
+        [{"id": 80, "foreignBookId": str(WORK_PLAIN), "monitored": False, "statistics": {"bookFileCount": 2}}],
+    )
+    monkeypatch.setattr(
+        server,
+        "_bookshelves",
+        [
+            BookshelfClient(EBOOK, transport=httpx.MockTransport(ebook)),
+            BookshelfClient(AUDIO, transport=httpx.MockTransport(audio)),
+        ],
+    )
+    return ebook, audio
 
 
 async def call(tool: str, **args: Any) -> Any:
@@ -97,26 +118,35 @@ async def call_err(tool: str, **args: Any) -> str:
     return str(e.value)
 
 
-async def test_refuses_dropping_books_with_files(admin: Fake, bookshelf: Fake) -> None:
+async def test_refuses_dropping_books_with_files(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
     admin.routes[("POST", "/admin/curation")] = curation_handler([WORK_WITH_FILE, WORK_PLAIN])
     err = await call_err("set_author_mode", author_id=AUTHOR, mode="allowlist")
-    assert "files" in err and '"bookshelf_book_id":70' in err
+    assert "files" in err and '"bookshelf_book_id":70' in err and '"bookshelf_book_id":80' in err
     assert [b.get("dry_run") for b in admin.posts()] == [True], "only the dry run was sent"
 
     res = await call("set_author_mode", author_id=AUTHOR, mode="allowlist", force=True)
     assert res["result"]["authors"] == 1
     assert admin.posts()[-1] == {"source": "mcp", "authors": [{"id": AUTHOR, "mode": "allowlist"}]}
-    assert res["library"]["with_files"][0]["work_id"] == WORK_WITH_FILE
+    assert {(e["instance"], e["work_id"]) for e in res["library"]["with_files"]} == {
+        ("ebook", WORK_WITH_FILE),
+        ("audio", WORK_PLAIN),
+    }
 
 
-async def test_monitored_without_files_is_a_warning(admin: Fake, bookshelf: Fake) -> None:
+async def test_audio_library_is_checked(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
+    admin.routes[("POST", "/admin/curation")] = curation_handler([WORK_PLAIN])
+    err = await call_err("set_works_status", work_ids=[WORK_PLAIN], status="hidden")
+    assert '"instance":"audio"' in err and '"files":2' in err
+
+
+async def test_monitored_without_files_is_a_warning(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
     admin.routes[("POST", "/admin/curation")] = curation_handler([WORK_MONITORED])
     res = await call("set_works_status", work_ids=[WORK_MONITORED], status="hidden", note="study guide")
     assert res["library"]["monitored"][0]["bookshelf_book_id"] == 71
     assert admin.posts()[-1]["works"] == [{"id": WORK_MONITORED, "status": "hidden", "note": "study guide"}]
 
 
-async def test_dry_run_doesnt_apply(admin: Fake, bookshelf: Fake) -> None:
+async def test_dry_run_doesnt_apply(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
     admin.routes[("POST", "/admin/curation")] = curation_handler([WORK_WITH_FILE])
     res = await call("merge_works", source_ids=[WORK_WITH_FILE], target_id=9, dry_run=True)
     assert res["dry_run"] is True
@@ -124,19 +154,24 @@ async def test_dry_run_doesnt_apply(admin: Fake, bookshelf: Fake) -> None:
     assert len(admin.posts()) == 1
 
 
-async def test_removals_need_bookshelf_or_force(admin: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "_bookshelf", None)
-    monkeypatch.setattr(server, "_bookshelf_set", True)
+async def test_removals_need_every_bookshelf_or_force(admin: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    ebook = fake_bookshelf("k", 7, [])
+    monkeypatch.setattr(server, "_bookshelves", [BookshelfClient(EBOOK, transport=httpx.MockTransport(ebook))])
     admin.routes[("POST", "/admin/curation")] = curation_handler([WORK_PLAIN])
-    assert "can't be checked" in await call_err("set_works_status", work_ids=[WORK_PLAIN], status="hidden")
+    err = await call_err("set_works_status", work_ids=[WORK_PLAIN], status="hidden")
+    assert "audio Bookshelf isn't configured" in err
+
+    res = await call("set_works_status", work_ids=[WORK_PLAIN], status="hidden", force=True)
+    assert res["result"]["works"] == 1
 
     # Nothing removed: no library check needed.
+    monkeypatch.setattr(server, "_bookshelves", [])
     admin.routes[("POST", "/admin/curation")] = curation_handler([])
     res = await call("set_works_status", work_ids=[WORK_PLAIN], status="canon")
     assert res["result"]["works"] == 1
 
 
-async def test_read_only(admin: Fake, bookshelf: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_read_only(admin: Fake, bookshelf: tuple[Fake, Fake], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "_settings", Settings(admin_url="http://rg", admin_token="tok", read_only=True))
     admin.routes[("POST", "/admin/curation")] = curation_handler([])
     assert "read-only" in await call_err("update_edition", edition_id=5, hidden=True)
@@ -144,7 +179,7 @@ async def test_read_only(admin: Fake, bookshelf: Fake, monkeypatch: pytest.Monke
     assert res["dry_run"] is True
 
 
-async def test_update_work_clear(admin: Fake, bookshelf: Fake) -> None:
+async def test_update_work_clear(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
     admin.routes[("POST", "/admin/curation")] = curation_handler([])
     await call("update_work", work_id=4, title="Better", clear=["merged_into", "status"])
     assert admin.posts()[-1]["works"] == [{"id": 4, "title": "Better", "merged_into": None, "status": None}]
@@ -152,7 +187,7 @@ async def test_update_work_clear(admin: Fake, bookshelf: Fake) -> None:
     assert "nothing to change" in await call_err("update_work", work_id=4)
 
 
-async def test_preview_author_and_errors(admin: Fake, bookshelf: Fake) -> None:
+async def test_preview_author_and_errors(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
     admin.routes[("GET", f"/admin/authors/{AUTHOR}/preview")] = lambda p, _: {**preview([WORK_WITH_FILE]), **p}
     res = await call("preview_author", author_id=AUTHOR, mode="allowlist")
     assert res["mode"] == "allowlist"
@@ -168,5 +203,14 @@ async def test_settings_from_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any)
     monkeypatch.setenv("RG_ADMIN_URL", "http://rg/")
     monkeypatch.delenv("RG_ADMIN_TOKEN", raising=False)
     monkeypatch.setenv("RG_ADMIN_TOKEN_FILE", str(tok))
+    monkeypatch.setenv("BOOKSHELF_URL", "http://bs/")
+    monkeypatch.setenv("BOOKSHELF_API_KEY", "k")
+    monkeypatch.setenv("BOOKSHELF_AUDIO_URL", "http://bs-audio")
+    monkeypatch.setenv("BOOKSHELF_AUDIO_API_KEY", "ka")
     s = Settings.from_env()
-    assert (s.admin_url, s.admin_token, s.bookshelf_url) == ("http://rg", "secret", "")
+    assert (s.admin_url, s.admin_token) == ("http://rg", "secret")
+    assert s.bookshelves == (EBOOK, AUDIO)
+
+    monkeypatch.delenv("BOOKSHELF_AUDIO_API_KEY")
+    with pytest.raises(CurationError, match="BOOKSHELF_AUDIO_API_KEY"):
+        Settings.from_env()
