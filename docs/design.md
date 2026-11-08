@@ -1,6 +1,6 @@
 # Permanent, curated metadata store
 
-Status: phase 0 deployed 2026-11-07; phase 1 in progress.
+Status: phases 0 and 1 deployed 2026-11-07; phase 2a in progress.
 
 ## Problem
 
@@ -130,6 +130,28 @@ refresh. The preview tool must diff against the Bookshelf library first
 when it would drop a book that has a file unless forced.
 
 The admin port is exposed on a LAN-only ingress (decided 2026-11-07).
+
+**Admin API (2a).** Separate listener, `--admin-port` (8789), off unless
+`ADMIN_TOKEN` or `ADMIN_TOKEN_FILE` is set; every request needs
+`Authorization: Bearer <token>`. JSON in and out, errors as
+`{"error": ...}` with 400/401/404/413/500.
+
+```
+GET  /admin/authors?q=&limit=                     search by name or ID
+GET  /admin/authors/{id}?status=&q=&limit=&offset= candidate works + verdicts
+GET  /admin/authors/{id}/preview                  served vs curated diff
+GET  /admin/works?q=&author=&limit=
+GET  /admin/works/{id}                            editions, credits, merges
+GET  /admin/editions?isbn=|asin=
+GET  /admin/log?kind=&id=&limit=
+POST /admin/curation                              {source, authors, works, editions}
+```
+
+`POST /admin/curation` takes partial patches keyed by `id`: absent fields
+are kept, null or `""` clears. The whole request is one transaction;
+merge chains, self-merges, unknown IDs and editions from unrelated works
+are rejected. No-op patches don't log. Canon adds a work for every
+credited author; `primary_author_id` restricts it to one.
 
 Open: whether Bookshelf follows a work whose ForeignId was merged (needs a
 test).

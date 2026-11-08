@@ -58,6 +58,10 @@ type server struct {
 	HardcoverAuth     string `required:"" env:"HARDCOVER_AUTH" xor:"hardcover-auth" help:"Hardcover Authorization header, e.g. 'Bearer ...'"`
 	HardcoverAuthFile []byte `required:"" type:"filecontent" xor:"hardcover-auth" env:"HARDCOVER_AUTH_FILE" help:"File containing the Hardcover Authorization header, e.g. 'Bearer ...'"`
 
+	AdminPort      int    `default:"8789" env:"ADMIN_PORT" help:"Port for the curation API."`
+	AdminToken     string `env:"ADMIN_TOKEN" help:"Bearer token for the curation API; it's off without one."`
+	AdminTokenFile []byte `type:"filecontent" env:"ADMIN_TOKEN_FILE" help:"File containing the curation API token."`
+
 	HardcoverDailyBudget int64 `default:"40000" env:"HARDCOVER_DAILY_BUDGET" help:"Max Hardcover requests per rolling 24h (0 = no cap). Background refreshes stop at 80%."`
 }
 
@@ -152,6 +156,15 @@ func (s *server) Run() error {
 		}
 	}()
 
+	if len(s.AdminTokenFile) > 0 {
+		s.AdminToken = string(bytes.TrimSpace(s.AdminTokenFile))
+	}
+	if s.AdminToken != "" {
+		go serveAdmin(ctx, store, s.AdminPort, s.AdminToken)
+	} else {
+		slog.Info("curation API disabled: no admin token")
+	}
+
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, os.Interrupt)
 
@@ -169,6 +182,25 @@ func (s *server) Run() error {
 	slog.Info("au revoir!")
 
 	return nil
+}
+
+func serveAdmin(ctx context.Context, store *internal.Store, port int, token string) {
+	mux := internal.NewAdminMux(store, token)
+	mux = internal.Requestlogger{}.Wrap(mux)
+	mux = middleware.RequestID(mux)
+	mux = middleware.Recoverer(mux)
+
+	addr := fmt.Sprintf(":%d", port)
+	server := &http.Server{
+		Handler:           mux,
+		Addr:              addr,
+		ReadHeaderTimeout: 10 * time.Second,
+		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
+	}
+	slog.Info("curation API listening on " + addr)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		internal.Log(ctx).Error("curation API stopped", "err", err)
+	}
 }
 
 func main() {

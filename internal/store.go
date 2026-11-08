@@ -101,6 +101,9 @@ func migrate(ctx context.Context, db *pgxpool.Pool) error {
 	return nil
 }
 
+// Close releases the store's connections.
+func (s *Store) Close() { s.db.Close() }
+
 // Ingest records a cache write in the store. The cache write has already
 // happened, so errors are only logged.
 func (s *Store) Ingest(ctx context.Context, key string, val []byte) {

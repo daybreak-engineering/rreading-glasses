@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"math/rand/v2"
 	"sync"
@@ -24,6 +25,19 @@ func testIDs(n int) []int64 {
 	return ids
 }
 
+// _testStore is shared by tests (they use distinct IDs) so they don't
+// exhaust Postgres connections.
+var _testStore = sync.OnceValues(func() (*Store, error) {
+	return NewStore(context.Background(), _testDSN)
+})
+
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	s, err := _testStore()
+	require.NoError(t, err)
+	return s
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
@@ -34,8 +48,7 @@ func mustJSON(t *testing.T, v any) []byte {
 func TestStoreIngest(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	s, err := NewStore(ctx, _testDSN)
-	require.NoError(t, err)
+	s := newTestStore(t)
 
 	ids := testIDs(6)
 	authorID, workID, otherWork, ed1, ed2, seriesID := ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]
@@ -116,10 +129,8 @@ func TestStoreIngest(t *testing.T) {
 func TestStoreBackfill(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	s, err := NewStore(ctx, _testDSN)
-	require.NoError(t, err)
-	pg, err := newPostgresCache(ctx, _testDSN, NewMetrics())
-	require.NoError(t, err)
+	s := newTestStore(t)
+	pg := &pgcache{db: s.db} // Same pool; the store has created the cache table.
 
 	ids := testIDs(4)
 	authorID, workID, embeddedWork, edID := ids[0], ids[1], ids[2], ids[3]
@@ -158,8 +169,7 @@ func TestStoreBackfill(t *testing.T) {
 func TestStoreCacheWritesThrough(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	s, err := NewStore(ctx, _testDSN)
-	require.NoError(t, err)
+	s := newTestStore(t)
 
 	c := NewStoreCache(newMemoryCache(), s)
 	workID := testIDs(1)[0]
@@ -174,10 +184,8 @@ func TestStoreCacheWritesThrough(t *testing.T) {
 func TestStoreBackfillKeys(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	s, err := NewStore(ctx, _testDSN)
-	require.NoError(t, err)
-	pg, err := newPostgresCache(ctx, _testDSN, NewMetrics())
-	require.NoError(t, err)
+	s := newTestStore(t)
+	pg := &pgcache{db: s.db} // Same pool; the store has created the cache table.
 
 	ids := testIDs(2)
 	pg.Set(ctx, WorkKey(ids[0]), mustJSON(t, workResource{ForeignID: ids[0]}), time.Hour)
@@ -199,8 +207,7 @@ func TestStoreBackfillKeys(t *testing.T) {
 func TestStoreConcurrentIngest(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	s, err := NewStore(ctx, _testDSN)
-	require.NoError(t, err)
+	s := newTestStore(t)
 
 	ids := testIDs(58)
 	authors, works := ids[:8], ids[8:]
