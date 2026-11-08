@@ -31,6 +31,8 @@ type cli struct {
 type backfill struct {
 	cmd.PGConfig
 	cmd.LogConfig
+
+	Keys []string `arg:"" optional:"" help:"Only these cache keys, e.g. a123 w456."`
 }
 
 func (b *backfill) Run() error {
@@ -40,7 +42,7 @@ func (b *backfill) Run() error {
 	if err != nil {
 		return fmt.Errorf("setting up store: %w", err)
 	}
-	_, err = store.Backfill(ctx)
+	_, err = store.Backfill(ctx, b.Keys...)
 	return err
 }
 

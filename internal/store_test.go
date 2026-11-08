@@ -3,9 +3,11 @@ package internal
 import (
 	"encoding/json"
 	"math/rand/v2"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -167,4 +169,58 @@ func TestStoreCacheWritesThrough(t *testing.T) {
 	var n int
 	require.NoError(t, s.db.QueryRow(ctx, `SELECT count(*) FROM works WHERE id = $1`, workID).Scan(&n))
 	assert.Equal(t, 1, n, "expiring the cache keeps the store row")
+}
+
+func TestStoreBackfillKeys(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := NewStore(ctx, _testDSN)
+	require.NoError(t, err)
+	pg, err := newPostgresCache(ctx, _testDSN, NewMetrics())
+	require.NoError(t, err)
+
+	ids := testIDs(2)
+	pg.Set(ctx, WorkKey(ids[0]), mustJSON(t, workResource{ForeignID: ids[0]}), time.Hour)
+	pg.Set(ctx, WorkKey(ids[1]), mustJSON(t, workResource{ForeignID: ids[1]}), time.Hour)
+
+	n, err := s.Backfill(ctx, WorkKey(ids[0]))
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	var got []int64
+	rows, err := s.db.Query(ctx, `SELECT id FROM works WHERE id = ANY($1)`, ids)
+	require.NoError(t, err)
+	got, err = pgx.CollectRows(rows, pgx.RowTo[int64])
+	require.NoError(t, err)
+	assert.Equal(t, []int64{ids[0]}, got)
+}
+
+// Full author entries sharing works, written concurrently, all land.
+func TestStoreConcurrentIngest(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	s, err := NewStore(ctx, _testDSN)
+	require.NoError(t, err)
+
+	ids := testIDs(58)
+	authors, works := ids[:8], ids[8:]
+	var wg sync.WaitGroup
+	errs := make([]error, len(authors))
+	for i, aid := range authors {
+		ws := make([]workResource, len(works))
+		for j, perm := range rand.Perm(len(works)) {
+			w := works[perm]
+			ws[j] = workResource{ForeignID: w, Books: []bookResource{{ForeignID: w + 100}}}
+		}
+		val := mustJSON(t, AuthorResource{ForeignID: aid, Works: ws})
+		wg.Go(func() { errs[i] = s.ingest(ctx, AuthorKey(aid), val, true) })
+	}
+	wg.Wait()
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+
+	var n int
+	require.NoError(t, s.db.QueryRow(ctx, `SELECT count(*) FROM author_works WHERE author_id = ANY($1)`, authors).Scan(&n))
+	assert.Equal(t, len(authors)*len(works), n)
 }

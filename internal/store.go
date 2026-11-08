@@ -2,12 +2,14 @@ package internal
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"slices"
 	"strconv"
 	"sync/atomic"
@@ -149,12 +151,25 @@ func (s *Store) ingest(ctx context.Context, key string, val []byte, full bool) e
 	return s.send(ctx, b)
 }
 
-// send runs a batch in one implicit transaction, retrying once on deadlock.
+// send runs a batch in one implicit transaction. Batches lock rows across
+// tables in whatever order the entry lists them, so concurrent writers can
+// deadlock; Postgres aborts one side, which retries after a jittered pause.
 func (s *Store) send(ctx context.Context, b *pgx.Batch) error {
-	err := s.db.SendBatch(ctx, b).Close()
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+	var err error
+	for attempt := range 6 {
+		if attempt > 0 {
+			d := time.Duration(25<<attempt)*time.Millisecond + rand.N(100*time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return errors.Join(err, ctx.Err())
+			case <-time.After(d):
+			}
+		}
 		err = s.db.SendBatch(ctx, b).Close()
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "40P01" {
+			return err
+		}
 	}
 	return err
 }
@@ -162,15 +177,17 @@ func (s *Store) send(ctx context.Context, b *pgx.Batch) error {
 func queueAuthor(b *pgx.Batch, a AuthorResource, full bool) {
 	queueAuthorRow(b, a, true)
 
-	ids := make([]int64, 0, len(a.Works))
-	for _, w := range a.Works {
+	// Sorted so concurrent writers mostly lock rows in the same order.
+	works := slices.SortedFunc(slices.Values(a.Works), func(x, y workResource) int {
+		return cmp.Compare(x.ForeignID, y.ForeignID)
+	})
+	ids := make([]int64, 0, len(works))
+	for _, w := range works {
 		ids = append(ids, w.ForeignID)
 		if full {
 			queueWork(b, w, fromAuthor)
 		}
 	}
-	// Sorted so concurrent writers lock rows in the same order.
-	slices.Sort(ids)
 	ids = slices.Compact(ids)
 	if len(ids) > 0 {
 		b.Queue(`INSERT INTO author_works (author_id, work_id)
@@ -322,12 +339,16 @@ func (s *Store) BackfillOnce(ctx context.Context) {
 
 // Backfill loads every author, work, book and series entry in the cache table
 // into the store, expired ones included. It makes no upstream requests and is
-// safe to rerun.
-func (s *Store) Backfill(ctx context.Context) (int64, error) {
+// safe to rerun. Given keys, it loads only those and doesn't record a run.
+func (s *Store) Backfill(ctx context.Context, keys ...string) (int64, error) {
 	start := time.Now()
-	Log(ctx).Info("starting store backfill")
+	Log(ctx).Info("starting store backfill", "keys", len(keys))
 
-	rows, err := s.db.Query(ctx, `SELECT key, value FROM cache WHERE key ~ '^[abws][0-9]+$'`)
+	q, args := `SELECT key, value FROM cache WHERE key ~ '^[abws][0-9]+$'`, []any{}
+	if len(keys) > 0 {
+		q, args = `SELECT key, value FROM cache WHERE key = ANY($1)`, []any{keys}
+	}
+	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -369,6 +390,10 @@ func (s *Store) Backfill(ctx context.Context) (int64, error) {
 	}
 
 	summary := fmt.Sprintf("%d entries, %d failed, %s", n.Load(), failed.Load(), time.Since(start).Round(time.Second))
+	if len(keys) > 0 {
+		Log(ctx).Info("finished store backfill", "summary", summary)
+		return n.Load(), nil
+	}
 	_, err = s.db.Exec(ctx, `INSERT INTO store_meta (key, value) VALUES ('backfill', $1)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`, summary)
 	Log(ctx).Info("finished store backfill", "summary", summary)
