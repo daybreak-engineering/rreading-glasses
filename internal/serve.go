@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -16,6 +17,8 @@ import (
 type Curator interface {
 	CurateAuthor(ctx context.Context, authorID int64, blob []byte) ([]byte, error)
 	CurateWork(ctx context.Context, workID int64, blob []byte) ([]byte, error)
+	CurateBook(ctx context.Context, blob []byte) ([]byte, error)
+	CurateSearch(ctx context.Context, results []SearchResource) ([]SearchResource, error)
 }
 
 var _ Curator = (*Store)(nil)
@@ -85,7 +88,8 @@ func (s *Store) CurateAuthor(ctx context.Context, authorID int64, blob []byte) (
 }
 
 // CurateWork applies curation to a cached work response. Hidden and merged
-// works stay fetchable by ID, so hand-added books keep working.
+// works must stay fetchable by ID: Bookshelf refreshes a library book that left
+// its author's list through this lookup, and keeps it because it resolves.
 func (s *Store) CurateWork(ctx context.Context, workID int64, blob []byte) ([]byte, error) {
 	var w workResource
 	if err := json.Unmarshal(blob, &w); err != nil {
@@ -368,4 +372,219 @@ func dropSeriesLinks(series []SeriesResource, works []workResource) []SeriesReso
 		}
 	}
 	return out
+}
+
+// workInfo is what lookups need to know about a work.
+type workInfo struct {
+	status          *string
+	mergedInto      *int64
+	editionID       *int64
+	primaryAuthorID *int64
+	bestBookID      *int64
+}
+
+// best is the edition a lookup should land on, if known.
+func (i workInfo) best() *int64 {
+	if i.editionID != nil {
+		return i.editionID
+	}
+	return i.bestBookID
+}
+
+func (s *Store) workInfos(ctx context.Context, ids []int64) (map[int64]workInfo, error) {
+	out := make(map[int64]workInfo, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT w.id, wc.status, wc.merged_into, wc.edition_id, wc.primary_author_id,
+			(w.data->>'BestBookId')::bigint
+		FROM works w LEFT JOIN work_curation wc ON wc.work_id = w.id WHERE w.id = ANY($1)`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var i workInfo
+		if err := rows.Scan(&id, &i.status, &i.mergedInto, &i.editionID, &i.primaryAuthorID, &i.bestBookID); err != nil {
+			return nil, err
+		}
+		out[id] = i
+	}
+	return out, rows.Err()
+}
+
+// mergedAuthors maps merged-away authors among ids to their targets.
+func (s *Store) mergedAuthors(ctx context.Context, ids []int64) (map[int64]AuthorResource, error) {
+	out := map[int64]AuthorResource{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT ac.author_id, a.data FROM author_curation ac
+		JOIN authors a ON a.id = ac.merged_into WHERE ac.author_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			return nil, err
+		}
+		var a AuthorResource
+		if err := json.Unmarshal(data, &a); err != nil {
+			return nil, err
+		}
+		out[id] = a
+	}
+	return out, rows.Err()
+}
+
+// CurateSearch drops hidden works from search results and resolves merged
+// works and authors, keeping rank. Works the store doesn't know pass through.
+func (s *Store) CurateSearch(ctx context.Context, results []SearchResource) ([]SearchResource, error) {
+	workIDs := make([]int64, 0, len(results))
+	bookIDs := make([]int64, 0, len(results))
+	authorIDs := make([]int64, 0, len(results))
+	for _, r := range results {
+		workIDs = append(workIDs, r.WorkID)
+		bookIDs = append(bookIDs, r.BookID)
+		authorIDs = append(authorIDs, r.Author.ID)
+	}
+	infos, err := s.workInfos(ctx, workIDs)
+	if err != nil {
+		return nil, err
+	}
+	var targets []int64
+	for _, i := range infos {
+		if i.mergedInto != nil {
+			targets = append(targets, *i.mergedInto)
+		}
+	}
+	targetInfos, err := s.workInfos(ctx, targets)
+	if err != nil {
+		return nil, err
+	}
+	eds, err := s.editionCurations(ctx, bookIDs)
+	if err != nil {
+		return nil, err
+	}
+	authors, err := s.mergedAuthors(ctx, authorIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]SearchResource, 0, len(results))
+	seen := make(map[int64]bool, len(results))
+	for _, r := range results {
+		info := infos[r.WorkID]
+		if info.mergedInto != nil {
+			r.WorkID = *info.mergedInto
+			info = targetInfos[r.WorkID]
+			if b := info.best(); b != nil {
+				r.BookID = *b
+			}
+		}
+		if info.status != nil && *info.status == "hidden" {
+			continue
+		}
+		if ec, has := eds[r.BookID]; has && ec.Hidden {
+			if b := info.best(); b != nil {
+				r.BookID = *b
+			}
+		}
+		if info.primaryAuthorID != nil {
+			r.Author.ID = *info.primaryAuthorID
+		}
+		if a, merged := authors[r.Author.ID]; merged {
+			r.Author.ID = a.ForeignID
+		}
+		if seen[r.WorkID] {
+			continue
+		}
+		seen[r.WorkID] = true
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// CurateBook applies curation to an edition lookup, whose response is the
+// edition's work with just that edition. An edition of a merged work resolves
+// to the target. Hidden works stay as they are: a direct lookup still finds
+// them.
+func (s *Store) CurateBook(ctx context.Context, blob []byte) ([]byte, error) {
+	var w workResource
+	if err := json.Unmarshal(blob, &w); err != nil {
+		return nil, fmt.Errorf("decoding book: %w", err)
+	}
+	infos, err := s.workInfos(ctx, []int64{w.ForeignID})
+	if err != nil {
+		return nil, err
+	}
+	info := infos[w.ForeignID]
+	changed := false
+
+	if info.mergedInto != nil {
+		var data []byte
+		err := s.db.QueryRow(ctx, `SELECT data FROM works WHERE id = $1`, *info.mergedInto).Scan(&data)
+		if err != nil {
+			return nil, fmt.Errorf("loading merge target %d: %w", *info.mergedInto, err)
+		}
+		var target workResource
+		if err := json.Unmarshal(data, &target); err != nil {
+			return nil, err
+		}
+		target.Books = w.Books
+		w, changed = target, true
+		targetInfos, err := s.workInfos(ctx, []int64{w.ForeignID})
+		if err != nil {
+			return nil, err
+		}
+		info = targetInfos[w.ForeignID]
+	}
+
+	var titled WorkCuration
+	if err := s.db.QueryRow(ctx, `SELECT title FROM work_curation WHERE work_id = $1`, w.ForeignID).
+		Scan(&titled.Title); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(w.Books))
+	for _, b := range w.Books {
+		ids = append(ids, b.ForeignID)
+	}
+	eds, err := s.editionCurations(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if applyWork(&w, titled, nil, nil, eds) {
+		changed = true
+	}
+
+	if info.primaryAuthorID != nil && len(w.Authors) > 0 && w.Authors[0].ForeignID != *info.primaryAuthorID {
+		if i := slices.IndexFunc(w.Authors, func(a AuthorResource) bool { return a.ForeignID == *info.primaryAuthorID }); i > 0 {
+			a := w.Authors[i]
+			w.Authors = append([]AuthorResource{a}, slices.Delete(slices.Clone(w.Authors), i, i+1)...)
+			changed = true
+		}
+	}
+	authorIDs := make([]int64, len(w.Authors))
+	for i, a := range w.Authors {
+		authorIDs[i] = a.ForeignID
+	}
+	merged, err := s.mergedAuthors(ctx, authorIDs)
+	if err != nil {
+		return nil, err
+	}
+	for i, a := range w.Authors {
+		if t, has := merged[a.ForeignID]; has {
+			w.Authors[i] = t
+			changed = true
+		}
+	}
+
+	if !changed {
+		return blob, nil
+	}
+	return json.Marshal(w)
 }

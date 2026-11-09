@@ -148,6 +148,12 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 		h.error(w, err)
 		return
 	}
+	if h.curator != nil {
+		if result, err = h.curator.CurateSearch(ctx, result); err != nil {
+			h.error(w, err)
+			return
+		}
+	}
 
 	w.WriteHeader(http.StatusOK)
 	cacheFor(w, _searchTTL, true)
@@ -238,6 +244,12 @@ func (h *Handler) bulkBook(w http.ResponseWriter, r *http.Request) {
 					Log(ctx).Warn("getting book", "err", err, "bookID", foreignBookID)
 				}
 				return // Ignore the error.
+			}
+			if h.curator != nil {
+				if b, err = h.curator.CurateBook(ctx, b); err != nil {
+					Log(ctx).Warn("curating book", "err", err, "bookID", foreignBookID)
+					return
+				}
 			}
 
 			var workRsc workResource
@@ -391,6 +403,12 @@ func (h *Handler) getBookID(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.error(w, err)
 		return
+	}
+	if h.curator != nil {
+		if b, err = h.curator.CurateBook(ctx, b); err != nil {
+			h.error(w, err)
+			return
+		}
 	}
 
 	var workRsc workResource
@@ -553,6 +571,12 @@ func (h *Handler) getAuthorID(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			h.error(w, err)
 			return
+		}
+		if h.curator != nil {
+			if ww, err = h.curator.CurateBook(ctx, ww); err != nil {
+				h.error(w, err)
+				return
+			}
 		}
 
 		err = json.Unmarshal(ww, &work)

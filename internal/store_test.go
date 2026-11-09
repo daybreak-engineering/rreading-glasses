@@ -126,8 +126,14 @@ func TestStoreIngest(t *testing.T) {
 	assert.Equal(t, 0, n)
 }
 
+// _backfillMu serializes backfill tests: a full backfill reads every row in
+// the shared cache table, including ones another test expects to stay out.
+var _backfillMu sync.Mutex
+
 func TestStoreBackfill(t *testing.T) {
 	t.Parallel()
+	_backfillMu.Lock()
+	defer _backfillMu.Unlock()
 	ctx := t.Context()
 	s := newTestStore(t)
 	pg := &pgcache{db: s.db} // Same pool; the store has created the cache table.
@@ -183,6 +189,8 @@ func TestStoreCacheWritesThrough(t *testing.T) {
 
 func TestStoreBackfillKeys(t *testing.T) {
 	t.Parallel()
+	_backfillMu.Lock()
+	defer _backfillMu.Unlock()
 	ctx := t.Context()
 	s := newTestStore(t)
 	pg := &pgcache{db: s.db} // Same pool; the store has created the cache table.

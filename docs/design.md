@@ -120,8 +120,12 @@ always wins.
   byte-identical. Rules mode only removes works curation names, so a store
   that lags the cache can't shrink a list. The cache keeps upstream data. A
   curation failure returns an error rather than an uncurated list. Works
-  curation adds, and editions merged in, come from the store. Not done yet:
-  ISBN/ASIN and `/book/<id>` lookups of merged works, and search.
+  curation adds, and editions merged in, come from the store. Search drops
+  hidden works and resolves merged works and authors. Edition lookups
+  (`/book/<id>`, which ISBN/ASIN redirect to, and bulk) resolve a merged
+  work to its target and still find hidden works. `/work/<id>` deliberately
+  doesn't resolve merges (see the merge test below). Not curated:
+  `/series/<id>`, `/recommended`.
 
 Import the existing curation: `canon.tsv` / `match.py` output, the
 `keep-<aid>.txt` lists, `siblings.tsv`, the edition picks.
@@ -166,8 +170,14 @@ works against both Bookshelf libraries (ebook and audio, read-only) and
 refuses when a book with files would drop, unless forced. Canon adds a work for every
 credited author; `primary_author_id` restricts it to one.
 
-Open: whether Bookshelf follows a work whose ForeignId was merged (needs a
-test).
+Tested 2026-11-09 (one unmonitored, fileless book): Bookshelf does **not**
+follow a merge. A book that leaves the author list stays in the library and
+keeps refreshing through `/work/<id>`, which is why hidden and merged works
+must stay fetchable. The merged edition isn't added to the kept book either.
+So merges and hides stop new duplicates and junk arriving, but don't clean
+up a library: existing entries need deleting in Bookshelf. Untested: books
+with files, and what happens if `/work/<id>` stops resolving (presumably
+deletion, as in the 2026-11-04 incident).
 
 Split: **2a** curation tables, audit log, admin API, preview (nothing
 served changes); **2b** serve from the store with curation applied;

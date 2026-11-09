@@ -196,6 +196,14 @@ func (f fakeCurator) CurateWork(_ context.Context, _ int64, _ []byte) ([]byte, e
 	return []byte(`{"curated":true}`), f.err
 }
 
+func (f fakeCurator) CurateBook(_ context.Context, _ []byte) ([]byte, error) {
+	return []byte(`{"Authors":[{"ForeignId":99}]}`), f.err
+}
+
+func (f fakeCurator) CurateSearch(_ context.Context, r []SearchResource) ([]SearchResource, error) {
+	return r[:0], f.err
+}
+
 func TestHandlerCurator(t *testing.T) {
 	t.Parallel()
 	cache := newMemoryCache()
@@ -230,4 +238,116 @@ func TestHandlerCurator(t *testing.T) {
 	code, body = get(h)
 	assert.Equal(t, http.StatusInternalServerError, code, "failing beats serving uncurated lists")
 	assert.NotContains(t, body, "upstream")
+}
+
+func TestHandlerCuratesBookLookups(t *testing.T) {
+	t.Parallel()
+	cache := newMemoryCache()
+	ctrl, err := NewController(cache, NewMockgetter(gomock.NewController(t)), nil, nil)
+	require.NoError(t, err)
+	cache.Set(t.Context(), BookKey(1), mustJSON(t, workResource{
+		ForeignID: 5, Authors: []AuthorResource{{ForeignID: 7}},
+	}), _staleTTL*100)
+
+	h := NewHandler(ctrl)
+	h.SetCurator(fakeCurator{})
+	rec := httptest.NewRecorder()
+	h.getBookID(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/book/1", nil))
+	assert.Equal(t, http.StatusSeeOther, rec.Code)
+	assert.Equal(t, "/author/99?edition=1", rec.Header().Get("Location"), "redirects to the curated author")
+}
+
+func TestCurateSearch(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newCurationFixture(t)
+	unknown := testIDs(1)[0]
+	hit := func(work, book, author int64) SearchResource {
+		return SearchResource{WorkID: work, BookID: book, Author: SearchResourceAuthor{ID: author}}
+	}
+
+	// Without curation results pass through, unknown works included.
+	in := []SearchResource{hit(f.w[1], f.w1Ed, f.a), hit(unknown, 3, f.a)}
+	got, err := f.s.CurateSearch(ctx, in)
+	require.NoError(t, err)
+	assert.Equal(t, in, got)
+
+	shown, spare := f.otherEd+7000, f.otherEd+7001
+	f.s.Ingest(ctx, WorkKey(f.w[4]), mustJSON(t, workResource{
+		ForeignID: f.w[4], Title: "Work 4", BestBookID: shown,
+		Books: []bookResource{{ForeignID: shown}, {ForeignID: spare}},
+	}))
+	_, err = f.apply(t, fmt.Sprintf(`{
+		"authors": [{"id": %d, "merged_into": %d}],
+		"works": [
+			{"id": %d, "edition_id": %d},
+			{"id": %d, "status": "hidden"},
+			{"id": %d, "merged_into": %d},
+			{"id": %d, "primary_author_id": %d}],
+		"editions": [{"id": %d, "hidden": true}]}`,
+		f.b, f.a, f.w[1], f.w1Ed, f.w[2], f.w[3], f.w[1], f.w[5], f.a, spare))
+	require.NoError(t, err)
+
+	// A merged work takes its target's place, and its rank.
+	got, err = f.s.CurateSearch(ctx, []SearchResource{hit(f.w[3], f.w3Ed, f.a), hit(f.w[1], f.w1Ed, f.a)})
+	require.NoError(t, err)
+	assert.Equal(t, []SearchResource{hit(f.w[1], f.w1Ed, f.a)}, got)
+
+	got, err = f.s.CurateSearch(ctx, []SearchResource{
+		hit(f.w[2], f.otherEd, f.a), // Hidden.
+		hit(f.w[4], spare, f.a),     // Hidden edition lands on the best one.
+		hit(f.w[5], 9, f.b),         // Primary author override; b is merged too.
+		hit(unknown, 3, f.b),        // Merged author resolves.
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []SearchResource{hit(f.w[4], shown, f.a), hit(f.w[5], 9, f.a), hit(unknown, 3, f.a)}, got)
+}
+
+func TestCurateBook(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newCurationFixture(t)
+	author := AuthorResource{ForeignID: f.a, Name: "Author A"}
+
+	book := func(work, edition int64) []byte {
+		return mustJSON(t, workResource{
+			ForeignID: work, Title: "own", Authors: []AuthorResource{author},
+			Books: []bookResource{{ForeignID: edition, Title: "ed"}},
+		})
+	}
+	blob := book(f.w[3], f.w3Ed)
+	got, err := f.s.CurateBook(ctx, blob)
+	require.NoError(t, err)
+	assert.Equal(t, string(blob), string(got), "uncurated is untouched")
+
+	_, err = f.apply(t, fmt.Sprintf(`{"works": [
+		{"id": %d, "merged_into": %d},
+		{"id": %d, "title": "Better"},
+		{"id": %d, "status": "hidden"}]}`, f.w[3], f.w[1], f.w[1], f.w[2]))
+	require.NoError(t, err)
+
+	got, err = f.s.CurateBook(ctx, blob)
+	require.NoError(t, err)
+	var w workResource
+	require.NoError(t, json.Unmarshal(got, &w))
+	assert.Equal(t, f.w[1], w.ForeignID, "merged work's edition resolves to the target")
+	assert.Equal(t, "Better", w.Title)
+	assert.Equal(t, []int64{f.w3Ed}, editionIDs(w))
+
+	hidden := book(f.w[2], f.otherEd)
+	got, err = f.s.CurateBook(ctx, hidden)
+	require.NoError(t, err)
+	assert.Equal(t, string(hidden), string(got), "direct lookups still find hidden works")
+
+	// The primary author decides where /book redirects.
+	two := mustJSON(t, workResource{
+		ForeignID: f.w[4], Authors: []AuthorResource{author, {ForeignID: f.b, Name: "Author B"}},
+		Books: []bookResource{{ForeignID: 1}},
+	})
+	_, err = f.apply(t, fmt.Sprintf(`{"works": [{"id": %d, "primary_author_id": %d}]}`, f.w[4], f.b))
+	require.NoError(t, err)
+	got, err = f.s.CurateBook(ctx, two)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(got, &w))
+	assert.Equal(t, f.b, w.Authors[0].ForeignID)
 }
