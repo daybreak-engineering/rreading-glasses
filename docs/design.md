@@ -1,6 +1,6 @@
 # Permanent, curated metadata store
 
-Status: phases 0, 1 and 2a deployed; phase 2b in progress (off by default).
+Status: phases 0-2 deployed. Phase 3 reduced to the budget work; see below.
 
 ## Problem
 
@@ -218,5 +218,16 @@ fetches, so a 100-work bulk query costs the same as a single work. Its daily
 window resets at midnight UTC, and every response reports the remaining count
 (`x-ratelimit-daily-remaining`).
 
-Raw payloads are dropped for now: nothing needs the fields, and `bestAuthor`
-already skips non-author credits. `last_seen_upstream` moves to the scheduler.
+The budget uses that reported count once a response carries it, falling back
+to the saved local count after a restart.
+
+Not built, by decision (2026-11-09):
+
+- **Raw payloads.** Nothing needs the dropped fields, and `bestAuthor` already
+  skips non-author credits.
+- **Bulk fetches.** The GraphQL client already sends up to 25 queries per HTTP
+  call, so refreshing every work costs a few percent of a day's quota.
+- **Scheduler.** It was meant to ration a scarce budget, which turned out to
+  be a spending bug. Clients' reads refresh expired entries in the background,
+  and lists no longer shrink on upstream failures. Revisit if entries nobody
+  reads need to stay fresh.
