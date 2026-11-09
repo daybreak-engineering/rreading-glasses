@@ -171,9 +171,10 @@ refuses when a book with files would drop, unless forced. Canon adds a work for 
 credited author; `primary_author_id` restricts it to one.
 
 **Rules (2c).** `rule_verdicts` holds `junk` (narrow title regex), `foreign`
-(non-Latin title, or editions tagged only in other languages) and `sibling`
-(same normalized work title under one author, ignoring the subtitle Hardcover
-keeps in the full title; canon keeps, then rating) verdicts,
+(non-Latin title, or editions tagged only in other languages), `sibling`
+(same normalized full title under one author, ignoring only a form-naming
+subtitle such as ": Stories"; canon keeps, then rating) and `comic` (first
+Hardcover tag, default edition format, series or title) verdicts,
 computed offline by `rghc rules` or `POST /admin/rules/run`. They affect
 rules-mode author lists only with `--apply-rules` (off by default; library
 entries can be deleted), and never canon or overridden works.

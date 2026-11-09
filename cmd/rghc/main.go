@@ -63,7 +63,7 @@ func (r *rules) Run() error {
 	if err != nil {
 		return err
 	}
-	slog.Info("ran rules", "works", res.Works, "junk", res.Junk, "foreign", res.Foreign, "sibling", res.Sibling, "editions", res.Editions, "took", res.Took)
+	slog.Info("ran rules", "works", res.Works, "junk", res.Junk, "foreign", res.Foreign, "sibling", res.Sibling, "comic", res.Comic, "editions", res.Editions, "took", res.Took)
 	return nil
 }
 

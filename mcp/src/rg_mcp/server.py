@@ -28,7 +28,7 @@ Concepts:
   Targets can't themselves be merged.
 - Overrides: work title and default edition; edition language and hidden.
 
-Rules: `run_rules` recomputes junk, foreign and sibling verdicts. They only
+Rules: `run_rules` recomputes junk, foreign, sibling and comic verdicts. They only
 remove works from rules-mode authors when the server runs with APPLY_RULES, and
 never canon or manually overridden works. `preview_author(rules=true)` shows them.
 
@@ -229,7 +229,7 @@ async def preview_author(
         Literal["rules", "allowlist"] | None, Field(description="Preview this mode instead of the current one")
     ] = None,
     limit: Annotated[int, Field(ge=1, le=5000, description="Max works listed per side")] = 200,
-    rules: Annotated[bool, Field(description="Apply rule verdicts (junk, foreign, sibling) as if enabled")] = False,
+    rules: Annotated[bool, Field(description="Apply rule verdicts (junk, foreign, sibling, comic) as if enabled")] = False,
 ) -> Any:
     """Compare an author's served list with the curated one, and flag library books it would drop."""
     p = await admin().get(f"authors/{author_id}/preview", mode=mode, rules="1" if rules else None)

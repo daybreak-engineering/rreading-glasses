@@ -69,6 +69,26 @@ func TestClassifyWorksSiblings(t *testing.T) {
 	assert.NotContains(t, got, "5sibling")
 }
 
+func TestWorkKeyDuplicates(t *testing.T) {
+	t.Parallel()
+	key := func(title, full string) string { return workKey(&ruleWork{title: title, fullTitle: full}) }
+
+	assert.NotEqual(t, key("Hellboy", "Hellboy: The Silver Lantern Club"),
+		key("Hellboy", "Hellboy: The Complete Short Stories, Volume 2"), "short title is only the series")
+	assert.NotEqual(t, key("Baltimore", "Baltimore: The Red Kingdom #2"),
+		key("Baltimore", "Baltimore: The Red Kingdom #3"))
+	for _, n := range []string{"1", "2", "4"} {
+		title := "The Collected Stories of Philip K. Dick (Gateway), Volume "
+		assert.NotEqual(t, key(title+n, title+n), key(title+"3", title+"3"), n)
+	}
+	assert.NotEqual(t, key("Foo (Volume 2)", ""), key("Foo (Volume 3)", ""))
+
+	assert.Equal(t, key("The Wind's Twelve Quarters", "The Wind's Twelve Quarters: Stories"),
+		key("Wind's Twelve Quarters", "Wind's Twelve Quarters"), "true duplicate")
+	assert.Equal(t, key("Cat's Cradle", "Cat's Cradle: A Novel"), key("Cat's Cradle", ""))
+	assert.Equal(t, key("Emma (1996)", ""), key("Emma", ""), "a year isn't a volume")
+}
+
 func TestRulesAppliedToAuthor(t *testing.T) {
 	t.Parallel()
 	_rulesMu.Lock()
@@ -78,7 +98,7 @@ func TestRulesAppliedToAuthor(t *testing.T) {
 
 	ids := testIDs(10)
 	authorID := ids[0]
-	good, dup, junk, foreign, canonJunk, unknown := ids[1], ids[2], ids[3], ids[4], ids[5], ids[6]
+	good, dup, junk, foreign, canonJunk, unknown, comic := ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7]
 	author := AuthorResource{ForeignID: authorID, Name: "Rule Author"}
 	ingest := func(id int64, title string, rating int64, lang string) {
 		base.Ingest(ctx, WorkKey(id), mustJSON(t, workResource{
@@ -92,15 +112,20 @@ func TestRulesAppliedToAuthor(t *testing.T) {
 	ingest(junk, "Rule Novel Study Guide", 1, "eng")
 	ingest(foreign, "Роман", 1, "rus")
 	ingest(canonJunk, "Rule Saga Omnibus", 1, "eng")
+	base.Ingest(ctx, WorkKey(comic), mustJSON(t, workResource{
+		ForeignID: comic, Title: "Rule Comic Tale", FullTitle: "Rule Comic Tale", Genres: []string{"Comics", "Horror"},
+		Authors: []AuthorResource{author},
+		Books:   []bookResource{{ForeignID: comic + 100, Language: "eng"}},
+	}))
 
 	a := AuthorResource{ForeignID: authorID, Name: "Rule Author"}
-	for _, id := range []int64{good, dup, junk, foreign, canonJunk, unknown} {
+	for _, id := range []int64{good, dup, junk, foreign, canonJunk, unknown, comic} {
 		a.Works = append(a.Works, workResource{ForeignID: id, Books: []bookResource{}})
 	}
 	blob := mustJSON(t, a)
 	base.Ingest(ctx, AuthorKey(authorID), mustJSON(t, AuthorResource{
 		ForeignID: authorID, Name: "Rule Author",
-		Works: []workResource{{ForeignID: good}, {ForeignID: dup}, {ForeignID: junk}, {ForeignID: foreign}, {ForeignID: canonJunk}},
+		Works: []workResource{{ForeignID: good}, {ForeignID: dup}, {ForeignID: junk}, {ForeignID: foreign}, {ForeignID: canonJunk}, {ForeignID: comic}},
 	}))
 	_, err := base.ApplyCuration(ctx, CurationRequest{Source: "test", Works: []Patch{
 		{"id": mustJSON(t, canonJunk), "status": mustJSON(t, "canon")},
@@ -111,6 +136,7 @@ func TestRulesAppliedToAuthor(t *testing.T) {
 	require.NoError(t, err)
 	assert.Positive(t, res.Works)
 	assert.Positive(t, res.Junk)
+	assert.Positive(t, res.Comic)
 
 	// Verdicts alone change nothing.
 	got, err := base.CurateAuthor(ctx, authorID, blob)
@@ -123,10 +149,11 @@ func TestRulesAppliedToAuthor(t *testing.T) {
 	for _, w := range p.Removed {
 		reasons[w.ID] = w.Reason
 	}
-	require.Len(t, reasons, 3, "%v", reasons)
+	require.Len(t, reasons, 4, "%v", reasons)
 	assert.True(t, strings.HasPrefix(reasons[junk], "rule junk: "), reasons[junk])
 	assert.True(t, strings.HasPrefix(reasons[foreign], "rule foreign: "), reasons[foreign])
 	assert.Equal(t, fmt.Sprintf("rule sibling: duplicate of %d", good), reasons[dup])
+	assert.True(t, strings.HasPrefix(reasons[comic], "rule comic: "), reasons[comic])
 
 	on := *base
 	on.SetApplyRules(true)
@@ -139,6 +166,52 @@ func TestRulesAppliedToAuthor(t *testing.T) {
 	assert.NotContains(t, works, dup)
 	assert.NotContains(t, works, junk)
 	assert.NotContains(t, works, foreign)
+	assert.NotContains(t, works, comic)
+}
+
+func TestComicReason(t *testing.T) {
+	t.Parallel()
+	for name, w := range map[string]ruleWork{
+		"genre":  {genres: []string{"Comics & Graphic Novels", "Fantasy"}},
+		"manga":  {genres: []string{"Manga"}},
+		"format": {format: "Comic"},
+		"series": {series: []string{"Baltimore (Single Issues)"}},
+		"title":  {fullTitle: "Do Androids Dream of Electric Sheep? (Comic Adaptation) #19"},
+	} {
+		assert.NotEmpty(t, comicReason(&w), name)
+	}
+	for name, w := range map[string]ruleWork{
+		"later genre":  {genres: []string{"Classics", "Comics"}},
+		"prose":        {genres: []string{"Fantasy"}, format: "Paperback", series: []string{"Discworld"}, fullTitle: "Mort"},
+		"numbered":     {fullTitle: "Poseidon's Arrow: Dirk Pitt #22"},
+		"graphic arts": {genres: []string{"Graphic arts"}},
+	} {
+		assert.Empty(t, comicReason(&w), name)
+	}
+}
+
+func TestPickEditionFullTitle(t *testing.T) {
+	t.Parallel()
+	full := "Basic Economics: A Common Sense Guide"
+	current := ruleEdition{id: 1, title: full, language: "eng"}
+	other := ruleEdition{id: 2, title: "Basic Economics", language: "eng"}
+	pick, _ := pickEdition([]ruleEdition{current, other}, "Basic Economics", full, current.id)
+	assert.Zero(t, pick, "a noise word in the work's subtitle doesn't count")
+}
+
+func TestPickEditionForeignNeedsEnglish(t *testing.T) {
+	t.Parallel()
+	spanish := ruleEdition{id: 1, title: "Kioto", language: "spa"}
+	untagged := ruleEdition{id: 2, title: "Kioto"}
+	english := ruleEdition{id: 3, title: "Kioto", language: "eng"}
+	pick, _ := pickEdition([]ruleEdition{spanish, untagged}, "Kioto", "", spanish.id)
+	assert.Zero(t, pick, "an untagged edition may be the same translation")
+	pick, _ = pickEdition([]ruleEdition{spanish, untagged, english}, "Kioto", "", spanish.id)
+	assert.Equal(t, english.id, pick)
+
+	audio := ruleEdition{id: 4, title: "Kioto", language: "eng", format: "Audible"}
+	pick, _ = pickEdition([]ruleEdition{audio, untagged}, "Kioto", "", audio.id)
+	assert.Equal(t, untagged.id, pick, "untagged is fine when the default wasn't foreign")
 }
 
 func TestPickEdition(t *testing.T) {
@@ -152,24 +225,24 @@ func TestPickEdition(t *testing.T) {
 	noisy := ruleEdition{id: 7, title: "Cat's Cradle (Illustrated Edition)", language: "eng"}
 	all := []ruleEdition{clean, ebook, wrong, cyrillic, german, audio, noisy}
 
-	pick, _ := pickEdition(all, "Cat's Cradle", clean.id)
+	pick, _ := pickEdition(all, "Cat's Cradle", "", clean.id)
 	assert.Zero(t, pick, "a clean default stays")
 
 	for _, bad := range []ruleEdition{wrong, cyrillic, german, audio} {
-		pick, reason := pickEdition(all, "Cat's Cradle", bad.id)
+		pick, reason := pickEdition(all, "Cat's Cradle", "", bad.id)
 		assert.Equal(t, clean.id, pick, bad.title)
 		assert.NotEmpty(t, reason)
 	}
 
-	pick, reason := pickEdition([]ruleEdition{noisy, clean}, "Cat's Cradle", noisy.id)
+	pick, reason := pickEdition([]ruleEdition{noisy, clean}, "Cat's Cradle", "", noisy.id)
 	assert.Equal(t, clean.id, pick)
 	assert.Contains(t, reason, "illustrated")
 
 	study := ruleEdition{id: 8, title: "A Study in Scarlet", language: "eng"}
-	pick, _ = pickEdition([]ruleEdition{study}, "A Study in Scarlet", study.id)
+	pick, _ = pickEdition([]ruleEdition{study}, "A Study in Scarlet", "", study.id)
 	assert.Zero(t, pick, "a noise word in the work's own title doesn't count against it")
 
-	pick, _ = pickEdition([]ruleEdition{wrong, german}, "Cat's Cradle", wrong.id)
+	pick, _ = pickEdition([]ruleEdition{wrong, german}, "Cat's Cradle", "", wrong.id)
 	assert.Zero(t, pick, "nothing better to switch to")
 }
 

@@ -55,15 +55,29 @@ func nonLatin(s string) bool {
 	})
 }
 
-// siblingKey normalizes a work's title for finding duplicates: no parenthetical,
-// leading article, case or punctuation. Colons stay: Hardcover keeps subtitles
-// in the full title, so one here is part of the name ("Classics Illustrated:
-// Typee" isn't a duplicate of "Classics Illustrated").
+// _parenthetical matches a bracketed aside in a title.
+var _parenthetical = regexp.MustCompile(`\([^()]*\)|\[[^\[\]]*\]`)
+
+// _numberedAside matches an aside that tells volumes apart. A bare year doesn't.
+var _numberedAside = regexp.MustCompile(`(?i)\b(vol|volume|book|part|issue|no)\b|\d`)
+
+// _bareYear matches an aside holding only a year.
+var _bareYear = regexp.MustCompile(`^[(\[]\s*\d{4}\s*[)\]]$`)
+
+// _genericSubtitle matches a subtitle that only describes the form, so
+// "The Wind's Twelve Quarters: Stories" is still "Wind's Twelve Quarters".
+var _genericSubtitle = regexp.MustCompile(`(?i):\s*(an?\s+)?(novel|novella|memoir|stories|short\s+stories|tales|essays|poems|play)\s*$`)
+
+// siblingKey normalizes a title for finding duplicates: no aside, leading
+// article, case or punctuation. Numbered asides stay, since "(Volume 2)" and
+// "(Volume 3)" are different books.
 func siblingKey(title string) string {
-	s := strings.ToLower(title)
-	if i := strings.IndexAny(s, "(["); i >= 0 {
-		s = s[:i]
-	}
+	s := strings.ToLower(_parenthetical.ReplaceAllStringFunc(title, func(aside string) string {
+		if _numberedAside.MatchString(aside) && !_bareYear.MatchString(aside) {
+			return aside
+		}
+		return " "
+	}))
 	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}), " ")
@@ -73,6 +87,38 @@ func siblingKey(title string) string {
 		}
 	}
 	return s
+}
+
+// _comicGenre matches a Hardcover tag for comics.
+var _comicGenre = regexp.MustCompile(`(?i)^\W*(comics?|comic\s+books?|graphic\s+novels?(:.*)?|comics\s*&\s*graphic\s+novels.*|` +
+	`manga|anime\s*&\s*manga|graphic\s+novels\s*&\s*manga|cartoons\s+and\s+comics|adult\s+graphic\s+novels|.*\scomic\s+books)\W*$`)
+
+// _comicFormat, _comicSeries and _comicTitle match comics by edition format,
+// series name and full title.
+var (
+	_comicFormat = regexp.MustCompile(`(?i)comic|graphic\s+novel|single\s+issue`)
+	_comicSeries = regexp.MustCompile(`(?i)single\s+issues|comic\s+adaptation|\(comics?\)`)
+	_comicTitle  = regexp.MustCompile(`(?i)comic\s+adaptation|\(comics?\)|single\s+issues`)
+)
+
+// comicReason returns why a work looks like a comic, or "". Only the first
+// genre counts: tags are most-used first, and prose often carries "Comics"
+// further down (The Great Gatsby, Sapiens).
+func comicReason(w *ruleWork) string {
+	switch {
+	case len(w.genres) > 0 && _comicGenre.MatchString(w.genres[0]):
+		return "first genre is " + strconv.Quote(w.genres[0])
+	case _comicFormat.MatchString(w.format):
+		return "default edition format is " + strconv.Quote(w.format)
+	case _comicTitle.MatchString(w.fullTitle):
+		return "title says so"
+	}
+	for _, s := range w.series {
+		if _comicSeries.MatchString(s) {
+			return "series " + strconv.Quote(s)
+		}
+	}
+	return ""
 }
 
 // _editionNoise marks editions that make a poor default.
@@ -103,7 +149,7 @@ func headKey(title string) string {
 
 // editionFit rates an edition as a work's default: 0 can't be one, higher is
 // better. reason says why it can't, or what's off about it.
-func editionFit(e ruleEdition, workTitle string) (score int, reason string) {
+func editionFit(e ruleEdition, workTitle, fullTitle string) (score int, reason string) {
 	switch {
 	case nonLatin(e.title):
 		return 0, "non-Latin title"
@@ -114,7 +160,7 @@ func editionFit(e ruleEdition, workTitle string) (score int, reason string) {
 	}
 	// Language tags lie, so the title has to agree with the work's.
 	switch {
-	case siblingKey(e.title) == siblingKey(workTitle):
+	case siblingKey(e.title) == siblingKey(workTitle), siblingKey(e.title) == siblingKey(fullTitle):
 		score = 40
 	case headKey(e.title) == headKey(workTitle) && headKey(workTitle) != "":
 		score = 30
@@ -131,7 +177,7 @@ func editionFit(e ruleEdition, workTitle string) (score int, reason string) {
 		score++
 	}
 	// A noise word in the work's own name doesn't count (A Study in Scarlet).
-	if m := strings.ToLower(_editionNoise.FindString(e.title)); m != "" && !strings.Contains(strings.ToLower(workTitle), m) {
+	if m := strings.ToLower(_editionNoise.FindString(e.title)); m != "" && !strings.Contains(strings.ToLower(cmp.Or(fullTitle, workTitle)), m) {
 		return score - 20, "title has " + strconv.Quote(m)
 	}
 	return score, ""
@@ -139,22 +185,24 @@ func editionFit(e ruleEdition, workTitle string) (score int, reason string) {
 
 // pickEdition returns a better default than the current one, if the current
 // one is poor and something clean exists.
-func pickEdition(editions []ruleEdition, workTitle string, current int64) (int64, string) {
+func pickEdition(editions []ruleEdition, workTitle, fullTitle string, current int64) (int64, string) {
 	reason := "no current edition"
+	foreign := false // An untagged edition may be the same translation.
 	for _, e := range editions {
 		if e.id != current {
 			continue
 		}
 		var score int
-		if score, reason = editionFit(e, workTitle); score >= 30 {
+		if score, reason = editionFit(e, workTitle, fullTitle); score >= 30 {
 			return 0, "" // Fine as it is.
 		}
+		foreign = e.language != "" && e.language != _ruleLanguage
 	}
 	var best ruleEdition
 	bestScore := 0
 	for _, e := range editions {
-		score, _ := editionFit(e, workTitle)
-		if score < 30 {
+		score, _ := editionFit(e, workTitle, fullTitle)
+		if score < 30 || (foreign && e.language != _ruleLanguage) {
 			continue
 		}
 		if score > bestScore || (score == bestScore && e.id < best.id) {
@@ -173,18 +221,28 @@ type ruleWork struct {
 	fullTitle   string
 	ratingCount int64
 	languages   []string
+	genres      []string // Most-used first.
+	series      []string
+	format      string // Of the default edition.
 	canon       bool
 	gone        bool // Hidden or merged by hand.
 	pinned      bool // Default edition chosen by hand.
 	bestBookID  int64
 	junk        bool
 	foreign     bool
+	comic       bool
 }
 
 type verdict struct {
 	workID int64
 	rule   string
 	reason string
+}
+
+// workKey is the sibling key for a work. It uses the full title because the
+// short one can be just a series name ("Hellboy").
+func workKey(w *ruleWork) string {
+	return siblingKey(_genericSubtitle.ReplaceAllString(cmp.Or(w.fullTitle, w.title), ""))
 }
 
 // classifyWorks computes verdicts. lists is each author's served works.
@@ -199,6 +257,10 @@ func classifyWorks(works map[int64]*ruleWork, lists map[int64][]int64) []verdict
 			w.foreign = true
 			out = append(out, verdict{w.id, "foreign", reason})
 		}
+		if reason := comicReason(w); reason != "" {
+			w.comic = true
+			out = append(out, verdict{w.id, "comic", reason})
+		}
 	}
 
 	marked := map[int64]bool{}
@@ -209,7 +271,7 @@ func classifyWorks(works map[int64]*ruleWork, lists map[int64][]int64) []verdict
 			if w == nil || w.gone {
 				continue
 			}
-			if key := siblingKey(w.title); key != "" {
+			if key := workKey(w); key != "" {
 				groups[key] = append(groups[key], w)
 			}
 		}
@@ -220,12 +282,12 @@ func classifyWorks(works map[int64]*ruleWork, lists map[int64][]int64) []verdict
 			slices.SortFunc(g, func(x, y *ruleWork) int {
 				return cmp.Or(
 					cmpTrueFirst(x.canon, y.canon),
-					cmpTrueFirst(!x.junk && !x.foreign, !y.junk && !y.foreign),
+					cmpTrueFirst(!x.junk && !x.foreign && !x.comic, !y.junk && !y.foreign && !y.comic),
 					cmp.Compare(y.ratingCount, x.ratingCount),
 					cmp.Compare(x.id, y.id),
 				)
 			})
-			if g[0].junk || g[0].foreign {
+			if g[0].junk || g[0].foreign || g[0].comic {
 				continue // Nothing worth keeping to be a duplicate of.
 			}
 			for _, w := range g[1:] {
@@ -255,6 +317,7 @@ type RulesResult struct {
 	Junk     int    `json:"junk"`
 	Foreign  int    `json:"foreign"`
 	Sibling  int    `json:"sibling"`
+	Comic    int    `json:"comic"`
 	Editions int    `json:"editions"` // Works given a better default edition.
 	Took     string `json:"took"`
 }
@@ -271,7 +334,11 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 				WHERE e.work_id = w.id AND e.listed AND e.language <> ''), '{}'),
 			COALESCE(wc.status = 'canon', FALSE),
 			COALESCE(wc.status = 'hidden', FALSE) OR wc.merged_into IS NOT NULL,
-			wc.edition_id IS NOT NULL, COALESCE((w.data->>'BestBookId')::bigint, 0)
+			wc.edition_id IS NOT NULL, COALESCE((w.data->>'BestBookId')::bigint, 0),
+			COALESCE(w.data->'Genres', '[]'::jsonb),
+			COALESCE((SELECT array_agg(s.title) FROM series_works sw JOIN series s ON s.id = sw.series_id
+				WHERE sw.work_id = w.id), '{}'),
+			COALESCE((SELECT e.format FROM editions e WHERE e.id = (w.data->>'BestBookId')::bigint), '')
 		FROM works w LEFT JOIN work_curation wc ON wc.work_id = w.id`)
 	if err != nil {
 		return res, err
@@ -280,7 +347,7 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 	for rows.Next() {
 		w := &ruleWork{}
 		if err := rows.Scan(&w.id, &w.title, &w.fullTitle, &w.ratingCount, &w.languages, &w.canon, &w.gone,
-			&w.pinned, &w.bestBookID); err != nil {
+			&w.pinned, &w.bestBookID, &w.genres, &w.series, &w.format); err != nil {
 			return res, err
 		}
 		works[w.id] = w
@@ -321,7 +388,7 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 		if w.pinned || w.gone {
 			continue
 		}
-		if pick, reason := pickEdition(editions[id], w.title, w.bestBookID); pick != 0 {
+		if pick, reason := pickEdition(editions[id], w.title, w.fullTitle, w.bestBookID); pick != 0 {
 			editionRows = append(editionRows, []any{id, pick, reason})
 		}
 	}
@@ -339,6 +406,8 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 			res.Foreign++
 		case "sibling":
 			res.Sibling++
+		case "comic":
+			res.Comic++
 		}
 	}
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
