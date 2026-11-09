@@ -172,7 +172,8 @@ credited author; `primary_author_id` restricts it to one.
 
 **Rules (2c).** `rule_verdicts` holds `junk` (narrow title regex), `foreign`
 (non-Latin title, or editions tagged only in other languages) and `sibling`
-(same normalized title under one author; canon keeps, then rating) verdicts,
+(same normalized work title under one author, ignoring the subtitle Hardcover
+keeps in the full title; canon keeps, then rating) verdicts,
 computed offline by `rghc rules` or `POST /admin/rules/run`. They affect
 rules-mode author lists only with `--apply-rules` (off by default; library
 entries can be deleted), and never canon or overridden works.
@@ -185,7 +186,6 @@ the allowlist pilot), unless it has a manually added edition (`manualAdd`;
 inferred from 3 survivors). Survivors keep refreshing through `/work/<id>`,
 which is why hidden and merged works must stay fetchable. So merges and
 hides don't dedupe a library, and allowlist does clear non-canon entries.
-See `docs/media-reconcile.md`.
 
 Split: **2a** curation tables, audit log, admin API, preview (nothing
 served changes); **2b** serve from the store with curation applied;

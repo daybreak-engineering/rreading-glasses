@@ -40,7 +40,8 @@ func TestForeignReason(t *testing.T) {
 
 func TestSiblingKey(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, "dune", siblingKey("Dune: The Graphic Novel"))
+	assert.Equal(t, "classics illustrated typee", siblingKey("Classics Illustrated: Typee"))
+	assert.NotEqual(t, siblingKey("Classics Illustrated"), siblingKey("Classics Illustrated: Typee"))
 	assert.Equal(t, "dune", siblingKey("The DUNE (Illustrated)"))
 	assert.Equal(t, "moby dick", siblingKey("Moby-Dick"))
 	assert.Equal(t, "бойня", siblingKey("Бойня"))

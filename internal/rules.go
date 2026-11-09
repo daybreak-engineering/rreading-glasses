@@ -55,11 +55,13 @@ func nonLatin(s string) bool {
 	})
 }
 
-// siblingKey normalizes a title for finding duplicates: no subtitle, leading
-// article, case or punctuation.
+// siblingKey normalizes a work's title for finding duplicates: no parenthetical,
+// leading article, case or punctuation. Colons stay: Hardcover keeps subtitles
+// in the full title, so one here is part of the name ("Classics Illustrated:
+// Typee" isn't a duplicate of "Classics Illustrated").
 func siblingKey(title string) string {
 	s := strings.ToLower(title)
-	if i := strings.IndexAny(s, ":(["); i >= 0 {
+	if i := strings.IndexAny(s, "(["); i >= 0 {
 		s = s[:i]
 	}
 	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool {
