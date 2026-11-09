@@ -89,6 +89,7 @@ type WorkDetail struct {
 	URL         string           `json:"url"`
 	BestBookID  int64            `json:"best_book_id"`
 	Curation    *WorkCuration    `json:"curation,omitempty"`
+	RuleEdition *int64           `json:"rule_edition_id,omitempty"` // Default a rule would pick.
 	Authors     []Credit         `json:"authors"`
 	Series      []SeriesLink     `json:"series"`
 	MergedFrom  []int64          `json:"merged_from"`
@@ -260,6 +261,11 @@ func (s *Store) Work(ctx context.Context, workID int64) (WorkDetail, error) {
 		wc.ID = workID
 		d.Curation = &wc
 	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return d, err
+	}
+
+	err = s.db.QueryRow(ctx, `SELECT edition_id FROM rule_editions WHERE work_id = $1`, workID).Scan(&d.RuleEdition)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return d, err
 	}
 

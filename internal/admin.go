@@ -166,7 +166,7 @@ func (a *admin) runRules(w http.ResponseWriter, r *http.Request) {
 	res, err := a.store.RunRules(r.Context())
 	if err == nil {
 		Log(r.Context()).Info("ran rules", "works", res.Works, "junk", res.Junk,
-			"foreign", res.Foreign, "sibling", res.Sibling, "took", res.Took)
+			"foreign", res.Foreign, "sibling", res.Sibling, "editions", res.Editions, "took", res.Took)
 	}
 	adminJSON(w, res, err)
 }

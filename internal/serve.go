@@ -211,6 +211,26 @@ func (s *Store) curateWorks(ctx context.Context, works []workResource) ([]workRe
 		return nil, false, err
 	}
 
+	if s.applyRules {
+		// Rule picks only fill in where nothing was chosen by hand.
+		rows, err := s.db.Query(ctx, `SELECT work_id, edition_id FROM rule_editions WHERE work_id = ANY($1)`, ids)
+		if err != nil {
+			return nil, false, err
+		}
+		var workID, editionID int64
+		if _, err := pgx.ForEachRow(rows, []any{&workID, &editionID}, func() error {
+			if wc := cur[workID]; wc.EditionID == nil {
+				pick := editionID
+				wc.EditionID = &pick
+				cur[workID] = wc
+				picked = append(picked, pick)
+			}
+			return nil
+		}); err != nil {
+			return nil, false, err
+		}
+	}
+
 	fromSources, err := s.listedEditions(ctx, sourceIDs)
 	if err != nil {
 		return nil, false, err

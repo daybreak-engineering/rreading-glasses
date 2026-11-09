@@ -177,8 +177,10 @@ keeps in the full title; canon keeps, then rating) verdicts,
 computed offline by `rghc rules` or `POST /admin/rules/run`. They affect
 rules-mode author lists only with `--apply-rules` (off by default; library
 entries can be deleted), and never canon or overridden works.
-`preview?rules=1` shows the effect first. Primary-author and edition-scoring
-rules aren't built: the mapped data lacks contributor roles (phase 3).
+`preview?rules=1` shows the effect first. Edition scoring (`rule_editions`,
+same flag) replaces a default edition only when it's foreign, audio, off-title
+or noisy and a clean one exists; a manual `edition_id` wins. A primary-author
+rule isn't built: the mapped data lacks contributor roles (phase 3).
 
 Tested 2026-11-09: Bookshelf does **not** follow a merge, and a book that
 leaves an author's list is **deleted on refresh** (28 Vonnegut entries in

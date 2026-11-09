@@ -75,6 +75,98 @@ func siblingKey(title string) string {
 	return s
 }
 
+// _editionNoise marks editions that make a poor default.
+var _editionNoise = regexp.MustCompile(`(?i)\b(` +
+	`illustrated|annotated|level\s*\d|study|guide|summary|abridged|retold|graphic|` +
+	`large\s+print|edition|condensed|readers?|beginner|a\s+novel|paperback|hardcover` +
+	`)\b`)
+
+// _audioFormat matches formats that aren't text.
+var _audioFormat = regexp.MustCompile(`(?i)audio|audible|\bcd\b|cassette|mp3`)
+
+type ruleEdition struct {
+	id       int64
+	title    string
+	language string
+	format   string
+	isbn13   string
+	isEbook  bool
+}
+
+// headKey is siblingKey for the part of a title before any subtitle.
+func headKey(title string) string {
+	if i := strings.Index(title, ":"); i >= 0 {
+		title = title[:i]
+	}
+	return siblingKey(title)
+}
+
+// editionFit rates an edition as a work's default: 0 can't be one, higher is
+// better. reason says why it can't, or what's off about it.
+func editionFit(e ruleEdition, workTitle string) (score int, reason string) {
+	switch {
+	case nonLatin(e.title):
+		return 0, "non-Latin title"
+	case _audioFormat.MatchString(e.format):
+		return 0, "audio format"
+	case e.language != "" && e.language != _ruleLanguage:
+		return 0, "language " + e.language
+	}
+	// Language tags lie, so the title has to agree with the work's.
+	switch {
+	case siblingKey(e.title) == siblingKey(workTitle):
+		score = 40
+	case headKey(e.title) == headKey(workTitle) && headKey(workTitle) != "":
+		score = 30
+	default:
+		return 0, "title doesn't match the work"
+	}
+	if e.language == _ruleLanguage {
+		score += 4
+	}
+	if e.isEbook {
+		score += 2
+	}
+	if e.isbn13 != "" {
+		score++
+	}
+	// A noise word in the work's own name doesn't count (A Study in Scarlet).
+	if m := strings.ToLower(_editionNoise.FindString(e.title)); m != "" && !strings.Contains(strings.ToLower(workTitle), m) {
+		return score - 20, "title has " + strconv.Quote(m)
+	}
+	return score, ""
+}
+
+// pickEdition returns a better default than the current one, if the current
+// one is poor and something clean exists.
+func pickEdition(editions []ruleEdition, workTitle string, current int64) (int64, string) {
+	reason := "no current edition"
+	for _, e := range editions {
+		if e.id != current {
+			continue
+		}
+		var score int
+		if score, reason = editionFit(e, workTitle); score >= 30 {
+			return 0, "" // Fine as it is.
+		}
+	}
+	var best ruleEdition
+	bestScore := 0
+	for _, e := range editions {
+		score, _ := editionFit(e, workTitle)
+		if score < 30 {
+			continue
+		}
+		if score > bestScore || (score == bestScore && e.id < best.id) {
+			best, bestScore = e, score
+		}
+	}
+	if bestScore == 0 {
+		return 0, ""
+	}
+	return best.id, "current edition: " + reason
+}
+
 type ruleWork struct {
 	id          int64
 	title       string
@@ -83,6 +175,8 @@ type ruleWork struct {
 	languages   []string
 	canon       bool
 	gone        bool // Hidden or merged by hand.
+	pinned      bool // Default edition chosen by hand.
+	bestBookID  int64
 	junk        bool
 	foreign     bool
 }
@@ -157,11 +251,12 @@ func cmpTrueFirst(x, y bool) int {
 
 // RulesResult summarizes a rules run.
 type RulesResult struct {
-	Works   int    `json:"works"`
-	Junk    int    `json:"junk"`
-	Foreign int    `json:"foreign"`
-	Sibling int    `json:"sibling"`
-	Took    string `json:"took"`
+	Works    int    `json:"works"`
+	Junk     int    `json:"junk"`
+	Foreign  int    `json:"foreign"`
+	Sibling  int    `json:"sibling"`
+	Editions int    `json:"editions"` // Works given a better default edition.
+	Took     string `json:"took"`
 }
 
 // RunRules recomputes every verdict from stored data. It makes no upstream
@@ -175,7 +270,8 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 			COALESCE((SELECT array_agg(DISTINCT e.language) FROM editions e
 				WHERE e.work_id = w.id AND e.listed AND e.language <> ''), '{}'),
 			COALESCE(wc.status = 'canon', FALSE),
-			COALESCE(wc.status = 'hidden', FALSE) OR wc.merged_into IS NOT NULL
+			COALESCE(wc.status = 'hidden', FALSE) OR wc.merged_into IS NOT NULL,
+			wc.edition_id IS NOT NULL, COALESCE((w.data->>'BestBookId')::bigint, 0)
 		FROM works w LEFT JOIN work_curation wc ON wc.work_id = w.id`)
 	if err != nil {
 		return res, err
@@ -183,7 +279,8 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 	defer rows.Close()
 	for rows.Next() {
 		w := &ruleWork{}
-		if err := rows.Scan(&w.id, &w.title, &w.fullTitle, &w.ratingCount, &w.languages, &w.canon, &w.gone); err != nil {
+		if err := rows.Scan(&w.id, &w.title, &w.fullTitle, &w.ratingCount, &w.languages, &w.canon, &w.gone,
+			&w.pinned, &w.bestBookID); err != nil {
 			return res, err
 		}
 		works[w.id] = w
@@ -205,6 +302,31 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 		return res, err
 	}
 
+	rows, err = s.db.Query(ctx, `SELECT e.work_id, e.id, e.title, e.language, e.format, e.isbn13, e.is_ebook
+		FROM editions e LEFT JOIN edition_curation ec ON ec.edition_id = e.id
+		WHERE e.listed AND NOT COALESCE(ec.hidden, FALSE)`)
+	if err != nil {
+		return res, err
+	}
+	editions := map[int64][]ruleEdition{}
+	var e ruleEdition
+	if _, err := pgx.ForEachRow(rows, []any{&workID, &e.id, &e.title, &e.language, &e.format, &e.isbn13, &e.isEbook}, func() error {
+		editions[workID] = append(editions[workID], e)
+		return nil
+	}); err != nil {
+		return res, err
+	}
+	var editionRows [][]any
+	for id, w := range works {
+		if w.pinned || w.gone {
+			continue
+		}
+		if pick, reason := pickEdition(editions[id], w.title, w.bestBookID); pick != 0 {
+			editionRows = append(editionRows, []any{id, pick, reason})
+		}
+	}
+	res.Editions = len(editionRows)
+
 	verdicts := classifyWorks(works, lists)
 	res.Works = len(works)
 	copyRows := make([][]any, len(verdicts))
@@ -223,8 +345,15 @@ func (s *Store) RunRules(ctx context.Context) (RulesResult, error) {
 		if _, err := tx.Exec(ctx, `DELETE FROM rule_verdicts`); err != nil {
 			return err
 		}
-		_, err := tx.CopyFrom(ctx, pgx.Identifier{"rule_verdicts"}, []string{"work_id", "rule", "reason"},
-			pgx.CopyFromRows(copyRows))
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"rule_verdicts"}, []string{"work_id", "rule", "reason"},
+			pgx.CopyFromRows(copyRows)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM rule_editions`); err != nil {
+			return err
+		}
+		_, err := tx.CopyFrom(ctx, pgx.Identifier{"rule_editions"}, []string{"work_id", "edition_id", "reason"},
+			pgx.CopyFromRows(editionRows))
 		return err
 	})
 	res.Took = time.Since(start).Round(time.Millisecond).String()

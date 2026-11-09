@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -138,4 +139,88 @@ func TestRulesAppliedToAuthor(t *testing.T) {
 	assert.NotContains(t, works, dup)
 	assert.NotContains(t, works, junk)
 	assert.NotContains(t, works, foreign)
+}
+
+func TestPickEdition(t *testing.T) {
+	t.Parallel()
+	clean := ruleEdition{id: 1, title: "Cat's Cradle", language: "eng", format: "Paperback", isbn13: "1"}
+	ebook := ruleEdition{id: 2, title: "Cat's Cradle: A Novel", language: "eng", format: "eBook", isEbook: true}
+	wrong := ruleEdition{id: 3, title: "Motherhood Realized", language: "eng"}
+	cyrillic := ruleEdition{id: 4, title: "Колиска для кішки", language: "eng"}
+	german := ruleEdition{id: 5, title: "Cat's Cradle", language: "ger"}
+	audio := ruleEdition{id: 6, title: "Cat's Cradle", language: "eng", format: "Audible.com"}
+	noisy := ruleEdition{id: 7, title: "Cat's Cradle (Illustrated Edition)", language: "eng"}
+	all := []ruleEdition{clean, ebook, wrong, cyrillic, german, audio, noisy}
+
+	pick, _ := pickEdition(all, "Cat's Cradle", clean.id)
+	assert.Zero(t, pick, "a clean default stays")
+
+	for _, bad := range []ruleEdition{wrong, cyrillic, german, audio} {
+		pick, reason := pickEdition(all, "Cat's Cradle", bad.id)
+		assert.Equal(t, clean.id, pick, bad.title)
+		assert.NotEmpty(t, reason)
+	}
+
+	pick, reason := pickEdition([]ruleEdition{noisy, clean}, "Cat's Cradle", noisy.id)
+	assert.Equal(t, clean.id, pick)
+	assert.Contains(t, reason, "illustrated")
+
+	study := ruleEdition{id: 8, title: "A Study in Scarlet", language: "eng"}
+	pick, _ = pickEdition([]ruleEdition{study}, "A Study in Scarlet", study.id)
+	assert.Zero(t, pick, "a noise word in the work's own title doesn't count against it")
+
+	pick, _ = pickEdition([]ruleEdition{wrong, german}, "Cat's Cradle", wrong.id)
+	assert.Zero(t, pick, "nothing better to switch to")
+}
+
+func TestRuleEditionsApplied(t *testing.T) {
+	t.Parallel()
+	_rulesMu.Lock()
+	defer _rulesMu.Unlock()
+	ctx := t.Context()
+	base := newTestStore(t)
+
+	ids := testIDs(2)
+	workID, pinnedWork := ids[0], ids[1]
+	const bad, good = 300, 600 // Edition ID offsets from the work's.
+	ingest := func(id int64) {
+		base.Ingest(ctx, WorkKey(id), mustJSON(t, workResource{
+			ForeignID: id, Title: "Edition Test", BestBookID: id + bad,
+			Books: []bookResource{{ForeignID: id + bad, Title: "Wrong Book", Language: "eng"}, {ForeignID: id + good, Title: "Edition Test", Language: "eng"}},
+		}))
+	}
+	ingest(workID)
+	ingest(pinnedWork)
+	_, err := base.ApplyCuration(ctx, CurationRequest{Source: "test", Works: []Patch{
+		{"id": mustJSON(t, pinnedWork), "edition_id": mustJSON(t, pinnedWork+bad)},
+	}})
+	require.NoError(t, err)
+
+	res, err := base.RunRules(ctx)
+	require.NoError(t, err)
+	assert.Positive(t, res.Editions)
+
+	d, err := base.Work(ctx, workID)
+	require.NoError(t, err)
+	require.NotNil(t, d.RuleEdition)
+	assert.Equal(t, workID+good, *d.RuleEdition)
+
+	blob := func(id int64) []byte {
+		return mustJSON(t, workResource{ForeignID: id, BestBookID: id + bad, Books: []bookResource{{ForeignID: id + bad}, {ForeignID: id + good}}})
+	}
+	got, err := base.CurateWork(ctx, workID, blob(workID))
+	require.NoError(t, err)
+	assert.Equal(t, string(blob(workID)), string(got), "no effect until rules are applied")
+
+	on := *base
+	on.SetApplyRules(true)
+	best := func(id int64) int64 {
+		got, err := on.CurateWork(ctx, id, blob(id))
+		require.NoError(t, err)
+		var w workResource
+		require.NoError(t, json.Unmarshal(got, &w))
+		return w.BestBookID
+	}
+	assert.Equal(t, workID+good, best(workID))
+	assert.Equal(t, pinnedWork+bad, best(pinnedWork), "a hand-picked edition wins")
 }
