@@ -170,14 +170,13 @@ works against both Bookshelf libraries (ebook and audio, read-only) and
 refuses when a book with files would drop, unless forced. Canon adds a work for every
 credited author; `primary_author_id` restricts it to one.
 
-Tested 2026-11-09 (one unmonitored, fileless book): Bookshelf does **not**
-follow a merge. A book that leaves the author list stays in the library and
-keeps refreshing through `/work/<id>`, which is why hidden and merged works
-must stay fetchable. The merged edition isn't added to the kept book either.
-So merges and hides stop new duplicates and junk arriving, but don't clean
-up a library: existing entries need deleting in Bookshelf. Untested: books
-with files, and what happens if `/work/<id>` stops resolving (presumably
-deletion, as in the 2026-11-04 incident).
+Tested 2026-11-09: Bookshelf does **not** follow a merge, and a book that
+leaves an author's list is **deleted on refresh** (28 Vonnegut entries in
+the allowlist pilot), unless it has a manually added edition (`manualAdd`;
+inferred from 3 survivors). Survivors keep refreshing through `/work/<id>`,
+which is why hidden and merged works must stay fetchable. So merges and
+hides don't dedupe a library, and allowlist does clear non-canon entries.
+See `docs/media-reconcile.md`.
 
 Split: **2a** curation tables, audit log, admin API, preview (nothing
 served changes); **2b** serve from the store with curation applied;

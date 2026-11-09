@@ -88,8 +88,8 @@ func (s *Store) CurateAuthor(ctx context.Context, authorID int64, blob []byte) (
 }
 
 // CurateWork applies curation to a cached work response. Hidden and merged
-// works must stay fetchable by ID: Bookshelf refreshes a library book that left
-// its author's list through this lookup, and keeps it because it resolves.
+// works must stay fetchable by ID: Bookshelf refreshes a manually added book
+// that left its author's list through this lookup, and keeps it if it resolves.
 func (s *Store) CurateWork(ctx context.Context, workID int64, blob []byte) ([]byte, error) {
 	var w workResource
 	if err := json.Unmarshal(blob, &w); err != nil {
