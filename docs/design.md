@@ -212,3 +212,11 @@ payloads and `last_seen_upstream` per row.
 
 Done: the budget counter is saved to `upstream_budget` every 15s and restored
 at startup, so a restart can only lose the last few seconds of counts.
+
+Measured 2026-11-09: Hardcover charges one request per HTTP call whatever it
+fetches, so a 100-work bulk query costs the same as a single work. Its daily
+window resets at midnight UTC, and every response reports the remaining count
+(`x-ratelimit-daily-remaining`).
+
+Raw payloads are dropped for now: nothing needs the fields, and `bestAuthor`
+already skips non-author credits. `last_seen_upstream` moves to the scheduler.

@@ -3,6 +3,7 @@ package internal
 import (
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,4 +128,65 @@ func TestBudgetTransportRestore(t *testing.T) {
 	now = now.Add(time.Hour)
 	assert.Equal(t, map[int64]int64{hour: 3}, bt.Snapshot(), "older hours fall out of the window")
 	assert.Equal(t, int64(3), bt.Used())
+}
+
+func TestBudgetTransportUsesUpstreamCount(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_800_000_000, 0)
+	reset := now.Add(time.Hour).Unix()
+	remaining := "49000"
+	headers := func() http.Header {
+		h := http.Header{}
+		h.Set("X-Ratelimit-Daily-Limit", "50000")
+		h.Set("X-Ratelimit-Daily-Remaining", remaining)
+		h.Set("X-Ratelimit-Daily-Reset", strconv.FormatInt(reset, 10))
+		return h
+	}
+	bt := &BudgetTransport{
+		Daily: 1500,
+		now:   func() time.Time { return now },
+		RoundTripper: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: headers()}, nil
+		}),
+	}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://example.invalid", nil)
+	require.NoError(t, err)
+
+	bt.Restore(map[int64]int64{now.Unix() / 3600: 7})
+	assert.Equal(t, int64(7), bt.Used(), "saved counts until the upstream reports")
+
+	_, err = bt.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1000), bt.Used(), "the upstream's figure includes other users of the key")
+
+	// A request in flight counts until its response arrives.
+	assert.True(t, bt.take())
+	assert.Equal(t, int64(1001), bt.Used())
+	bt.observe(headers())
+	assert.Equal(t, int64(1000), bt.Used())
+
+	// Out-of-order responses never lower usage within a day.
+	remaining = "49500"
+	bt.observe(headers())
+	assert.Equal(t, int64(1000), bt.Used())
+
+	// The cap applies to the upstream's count.
+	remaining = "48500"
+	bt.observe(headers())
+	_, err = bt.RoundTrip(req)
+	require.ErrorIs(t, err, errBudgetExhausted)
+
+	// Responses without the headers change nothing.
+	bt.observe(http.Header{})
+	assert.Equal(t, int64(1500), bt.Used())
+
+	// A new upstream day starts over.
+	now = now.Add(2 * time.Hour)
+	assert.Zero(t, bt.Used())
+	reset = now.Add(24 * time.Hour).Unix()
+	remaining = "49990"
+	_, err = bt.RoundTrip(req)
+	require.NoError(t, err)
+	assert.Equal(t, int64(10), bt.Used())
 }

@@ -137,9 +137,11 @@ func (t errorProxyTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 // budget is spent.
 var errBudgetExhausted = errors.Join(statusErr(http.StatusTooManyRequests), errors.New("upstream daily request budget exhausted"))
 
-// BudgetTransport caps requests over a rolling 24h window, counted in hourly
-// buckets. Requests past the cap fail without being sent. Counts live in memory;
-// PersistBudget saves them so a restart doesn't reset the budget.
+// BudgetTransport caps upstream requests per day. Requests past the cap fail
+// without being sent. Once a response reports the upstream's own daily usage
+// that's the count, since it includes anything else using the key and follows
+// the upstream's day. Until then it's a rolling 24h window in hourly buckets,
+// which PersistBudget saves so a restart doesn't reset it.
 type BudgetTransport struct {
 	http.RoundTripper
 	Daily      int64   // Cap per 24h; 0 disables the cap.
@@ -150,6 +152,10 @@ type BudgetTransport struct {
 	hours  [24]int64 // Unix hour each bucket was last used for.
 	now    func() time.Time
 	warned bool
+
+	upstreamUsed  int64 // Daily usage the upstream last reported.
+	upstreamReset int64 // Unix time that usage resets; 0 until reported.
+	pending       int64 // Requests sent since that report.
 }
 
 // RoundTrip implements http.RoundTripper.
@@ -157,7 +163,30 @@ func (t *BudgetTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if !t.take() {
 		return nil, errBudgetExhausted
 	}
-	return t.RoundTripper.RoundTrip(r)
+	resp, err := t.RoundTripper.RoundTrip(r)
+	if err == nil {
+		t.observe(resp.Header)
+	}
+	return resp, err
+}
+
+// observe records the upstream's own usage figures, if the response has them.
+func (t *BudgetTransport) observe(h http.Header) {
+	limit, err1 := strconv.ParseInt(h.Get("X-Ratelimit-Daily-Limit"), 10, 64)
+	remaining, err2 := strconv.ParseInt(h.Get("X-Ratelimit-Daily-Remaining"), 10, 64)
+	reset, err3 := strconv.ParseInt(h.Get("X-Ratelimit-Daily-Reset"), 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	used := limit - remaining
+	// Responses can arrive out of order; within a day usage only grows.
+	if reset != t.upstreamReset || used > t.upstreamUsed {
+		t.upstreamUsed = used
+	}
+	t.upstreamReset = reset
+	t.pending = max(t.pending-1, 0)
 }
 
 func (t *BudgetTransport) take() bool {
@@ -174,6 +203,7 @@ func (t *BudgetTransport) take() bool {
 	t.warned = false
 	h := t.hour()
 	t.counts[h%24]++
+	t.pending++
 	return true
 }
 
@@ -224,12 +254,15 @@ func (t *BudgetTransport) Restore(counts map[int64]int64) {
 	}
 }
 
-func (t *BudgetTransport) hour() int64 {
-	now := time.Now
+func (t *BudgetTransport) clock() time.Time {
 	if t.now != nil {
-		now = t.now
+		return t.now()
 	}
-	h := now().Unix() / 3600
+	return time.Now()
+}
+
+func (t *BudgetTransport) hour() int64 {
+	h := t.clock().Unix() / 3600
 	if t.hours[h%24] != h {
 		t.hours[h%24] = h
 		t.counts[h%24] = 0
@@ -238,6 +271,12 @@ func (t *BudgetTransport) hour() int64 {
 }
 
 func (t *BudgetTransport) usedLocked() int64 {
+	if t.upstreamReset != 0 {
+		if t.clock().Unix() >= t.upstreamReset {
+			return t.pending // A new upstream day.
+		}
+		return t.upstreamUsed + t.pending
+	}
 	h := t.hour()
 	var sum int64
 	for i := range t.counts {
