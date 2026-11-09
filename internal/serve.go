@@ -19,6 +19,8 @@ type Curator interface {
 	CurateWork(ctx context.Context, workID int64, blob []byte) ([]byte, error)
 	CurateBook(ctx context.Context, blob []byte) ([]byte, error)
 	CurateSearch(ctx context.Context, results []SearchResource) ([]SearchResource, error)
+	CurateSeries(ctx context.Context, blob []byte) ([]byte, error)
+	CurateRecommended(ctx context.Context, recs RecommentationsResource) (RecommentationsResource, error)
 }
 
 var _ Curator = (*Store)(nil)
@@ -607,4 +609,85 @@ func (s *Store) CurateBook(ctx context.Context, blob []byte) ([]byte, error) {
 		return blob, nil
 	}
 	return json.Marshal(w)
+}
+
+// resolveWorks follows curation for a list of works in order: hidden works are
+// dropped, merged ones become their target, and repeats go. keep says whether
+// each input survives and resolved is what it became. Works the store doesn't
+// know pass through.
+func (s *Store) resolveWorks(ctx context.Context, ids []int64) (keep []bool, resolved []int64, err error) {
+	infos, err := s.workInfos(ctx, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	var targets []int64
+	for _, i := range infos {
+		if i.mergedInto != nil {
+			targets = append(targets, *i.mergedInto)
+		}
+	}
+	targetInfos, err := s.workInfos(ctx, targets)
+	if err != nil {
+		return nil, nil, err
+	}
+	keep, resolved = make([]bool, len(ids)), make([]int64, len(ids))
+	seen := make(map[int64]bool, len(ids))
+	for n, id := range ids {
+		info := infos[id]
+		if info.mergedInto != nil {
+			id, info = *info.mergedInto, targetInfos[*info.mergedInto]
+		}
+		hidden := info.status != nil && *info.status == "hidden"
+		keep[n], resolved[n] = !hidden && !seen[id], id
+		seen[id] = seen[id] || !hidden
+	}
+	return keep, resolved, nil
+}
+
+// CurateSeries applies curation to a series' works. Without curation touching
+// them it returns blob unchanged.
+func (s *Store) CurateSeries(ctx context.Context, blob []byte) ([]byte, error) {
+	var sr SeriesResource
+	if err := json.Unmarshal(blob, &sr); err != nil {
+		return nil, fmt.Errorf("decoding series: %w", err)
+	}
+	ids := make([]int64, len(sr.LinkItems))
+	for i, l := range sr.LinkItems {
+		ids[i] = l.ForeignWorkID
+	}
+	keep, resolved, err := s.resolveWorks(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	links := make([]seriesWorkLinkResource, 0, len(sr.LinkItems))
+	changed := false
+	for i, l := range sr.LinkItems {
+		if !keep[i] {
+			changed = true
+			continue
+		}
+		changed = changed || resolved[i] != l.ForeignWorkID
+		l.ForeignWorkID = resolved[i]
+		links = append(links, l)
+	}
+	if !changed {
+		return blob, nil
+	}
+	sr.LinkItems = links
+	return json.Marshal(sr)
+}
+
+// CurateRecommended applies curation to recommended works, keeping order.
+func (s *Store) CurateRecommended(ctx context.Context, recs RecommentationsResource) (RecommentationsResource, error) {
+	keep, resolved, err := s.resolveWorks(ctx, recs.WorkIDs)
+	if err != nil {
+		return recs, err
+	}
+	out := RecommentationsResource{WorkIDs: make([]int64, 0, len(recs.WorkIDs))}
+	for i := range recs.WorkIDs {
+		if keep[i] {
+			out.WorkIDs = append(out.WorkIDs, resolved[i])
+		}
+	}
+	return out, nil
 }

@@ -204,6 +204,14 @@ func (f fakeCurator) CurateSearch(_ context.Context, r []SearchResource) ([]Sear
 	return r[:0], f.err
 }
 
+func (f fakeCurator) CurateSeries(_ context.Context, b []byte) ([]byte, error) {
+	return b, f.err
+}
+
+func (f fakeCurator) CurateRecommended(_ context.Context, r RecommentationsResource) (RecommentationsResource, error) {
+	return r, f.err
+}
+
 func TestHandlerCurator(t *testing.T) {
 	t.Parallel()
 	cache := newMemoryCache()
@@ -350,4 +358,36 @@ func TestCurateBook(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, json.Unmarshal(got, &w))
 	assert.Equal(t, f.b, w.Authors[0].ForeignID)
+}
+
+func TestCurateSeriesAndRecommended(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	f := newCurationFixture(t)
+	unknown := testIDs(1)[0]
+	link := func(work int64, pos string) seriesWorkLinkResource {
+		return seriesWorkLinkResource{ForeignWorkID: work, PositionInSeries: pos}
+	}
+
+	blob := mustJSON(t, SeriesResource{ForeignID: 7, Title: "S", LinkItems: []seriesWorkLinkResource{
+		link(f.w[1], "1"), link(f.w[2], "2"), link(f.w[3], "3"), link(unknown, "4"),
+	}})
+	got, err := f.s.CurateSeries(ctx, blob)
+	require.NoError(t, err)
+	assert.Equal(t, string(blob), string(got), "uncurated is untouched")
+
+	_, err = f.apply(t, fmt.Sprintf(`{"works": [
+		{"id": %d, "status": "hidden"},
+		{"id": %d, "merged_into": %d}]}`, f.w[2], f.w[3], f.w[4]))
+	require.NoError(t, err)
+
+	got, err = f.s.CurateSeries(ctx, blob)
+	require.NoError(t, err)
+	var sr SeriesResource
+	require.NoError(t, json.Unmarshal(got, &sr))
+	assert.Equal(t, []seriesWorkLinkResource{link(f.w[1], "1"), link(f.w[4], "3"), link(unknown, "4")}, sr.LinkItems)
+
+	recs, err := f.s.CurateRecommended(ctx, RecommentationsResource{WorkIDs: []int64{f.w[3], f.w[2], f.w[4], unknown}})
+	require.NoError(t, err)
+	assert.Equal(t, []int64{f.w[4], unknown}, recs.WorkIDs, "merged takes its target's place, repeats go")
 }

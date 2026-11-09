@@ -124,8 +124,8 @@ always wins.
   hidden works and resolves merged works and authors. Edition lookups
   (`/book/<id>`, which ISBN/ASIN redirect to, and bulk) resolve a merged
   work to its target and still find hidden works. `/work/<id>` deliberately
-  doesn't resolve merges (see the merge test below). Not curated:
-  `/series/<id>`, `/recommended`.
+  doesn't resolve merges (see the merge test below). `/series/<id>` and
+  `/recommended` drop hidden works and resolve merges too.
 
 Import the existing curation: `canon.tsv` / `match.py` output, the
 `keep-<aid>.txt` lists, `siblings.tsv`, the edition picks.

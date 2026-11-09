@@ -644,6 +644,12 @@ func (h *Handler) getSeriesID(w http.ResponseWriter, r *http.Request) {
 		h.error(w, err)
 		return
 	}
+	if h.curator != nil {
+		if out, err = h.curator.CurateSeries(ctx, out); err != nil {
+			h.error(w, err)
+			return
+		}
+	}
 
 	cacheFor(w, _seriesTTL, false)
 	w.WriteHeader(http.StatusOK)
@@ -769,6 +775,12 @@ func (h *Handler) recommended(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.error(w, err)
 		return
+	}
+	if h.curator != nil {
+		if result, err = h.curator.CurateRecommended(ctx, result); err != nil {
+			h.error(w, err)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
