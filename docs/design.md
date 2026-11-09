@@ -170,6 +170,15 @@ works against both Bookshelf libraries (ebook and audio, read-only) and
 refuses when a book with files would drop, unless forced. Canon adds a work for every
 credited author; `primary_author_id` restricts it to one.
 
+**Rules (2c).** `rule_verdicts` holds `junk` (narrow title regex), `foreign`
+(non-Latin title, or editions tagged only in other languages) and `sibling`
+(same normalized title under one author; canon keeps, then rating) verdicts,
+computed offline by `rghc rules` or `POST /admin/rules/run`. They affect
+rules-mode author lists only with `--apply-rules` (off by default; library
+entries can be deleted), and never canon or overridden works.
+`preview?rules=1` shows the effect first. Primary-author and edition-scoring
+rules aren't built: the mapped data lacks contributor roles (phase 3).
+
 Tested 2026-11-09: Bookshelf does **not** follow a merge, and a book that
 leaves an author's list is **deleted on refresh** (28 Vonnegut entries in
 the allowlist pilot), unless it has a manually added edition (`manualAdd`;

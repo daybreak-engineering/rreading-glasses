@@ -145,8 +145,8 @@ unmonitored. Survivors outside canon: 657 *If God Were Alive Today* and 658
 ## Open items to reconcile
 
 - [ ] Rolling out allowlist deletes each author's non-canon, fileless,
-  non-manual entries. Decide if that's wanted author by author. The MCP
-  guard doesn't yet report these deletions.
+  non-manual entries. Decide if that's wanted author by author; the MCP's
+  `library.would_delete` lists them on a dry run.
 - [ ] 12 orphaned files, below: purge or re-import. A rescan may pick them
   up as unmapped files. Some are larger than the kept copy, so check first.
 - [ ] 6 older unmapped files: Notes on slaughterhouse five, Puppet Masters,

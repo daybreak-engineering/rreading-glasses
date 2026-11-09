@@ -25,6 +25,7 @@ func NewAdminMux(store *Store, token string) http.Handler {
 	mux.HandleFunc("GET /admin/editions", a.editions)
 	mux.HandleFunc("GET /admin/log", a.log)
 	mux.HandleFunc("POST /admin/curation", a.curate)
+	mux.HandleFunc("POST /admin/rules/run", a.runRules)
 	return requireToken(token, mux)
 }
 
@@ -95,7 +96,7 @@ func (a *admin) preview(w http.ResponseWriter, r *http.Request) {
 		adminError(w, badRequest("mode must be rules or allowlist"))
 		return
 	}
-	res, err := a.store.PreviewAuthor(r.Context(), id, mode)
+	res, err := a.store.PreviewAuthor(r.Context(), id, mode, r.FormValue("rules") == "1")
 	adminJSON(w, res, err)
 }
 
@@ -158,6 +159,15 @@ func (a *admin) log(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := a.store.CurationLog(r.Context(), kind, id, int(limit))
+	adminJSON(w, res, err)
+}
+
+func (a *admin) runRules(w http.ResponseWriter, r *http.Request) {
+	res, err := a.store.RunRules(r.Context())
+	if err == nil {
+		Log(r.Context()).Info("ran rules", "works", res.Works, "junk", res.Junk,
+			"foreign", res.Foreign, "sibling", res.Sibling, "took", res.Took)
+	}
 	adminJSON(w, res, err)
 }
 

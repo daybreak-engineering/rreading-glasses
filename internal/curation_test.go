@@ -121,7 +121,7 @@ func TestCurationAllowlistAndPreview(t *testing.T) {
 	assert.Equal(t, []int64{f.w[1], f.unlisted}, v.Works)
 	assert.Equal(t, "not canon", v.Excluded[f.w[2]])
 
-	p, err := f.s.PreviewAuthor(ctx, f.a, "")
+	p, err := f.s.PreviewAuthor(ctx, f.a, "", false)
 	require.NoError(t, err)
 	assert.Equal(t, 5, p.Served)
 	assert.Equal(t, 2, p.Curated)
@@ -315,10 +315,10 @@ func TestCurationDryRun(t *testing.T) {
 	assert.Empty(t, log)
 
 	// Previewing a mode without switching to it.
-	p, err := f.s.PreviewAuthor(ctx, f.a, "allowlist")
+	p, err := f.s.PreviewAuthor(ctx, f.a, "allowlist", false)
 	require.NoError(t, err)
 	assert.Equal(t, "allowlist", p.Mode)
 	assert.Len(t, p.Removed, 5)
-	_, err = f.s.PreviewAuthor(ctx, 1, "")
+	_, err = f.s.PreviewAuthor(ctx, 1, "", false)
 	assert.ErrorIs(t, err, errNotFound)
 }

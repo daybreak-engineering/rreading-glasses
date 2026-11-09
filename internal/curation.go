@@ -113,7 +113,7 @@ func (s *Store) ApplyCuration(ctx context.Context, req CurationRequest) (Curatio
 			return err
 		}
 		for _, id := range authors {
-			p, err := previewAuthor(ctx, tx, id, "")
+			p, err := previewAuthor(ctx, tx, id, viewOpts{Rules: s.applyRules})
 			if err != nil {
 				return err
 			}
@@ -496,7 +496,7 @@ type AuthorView struct {
 // hidden ones; allowlist mode keeps only canon works. Merged works are
 // replaced by their target.
 func (s *Store) EffectiveWorks(ctx context.Context, authorID int64) (AuthorView, error) {
-	return effectiveWorks(ctx, s.db, authorID, "")
+	return effectiveWorks(ctx, s.db, authorID, viewOpts{Rules: s.applyRules})
 }
 
 // querier is a pool or a transaction.
@@ -505,9 +505,14 @@ type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// effectiveWorks is EffectiveWorks on q; a non-empty mode overrides the
-// author's.
-func effectiveWorks(ctx context.Context, q querier, authorID int64, mode string) (AuthorView, error) {
+// viewOpts adjusts effectiveWorks.
+type viewOpts struct {
+	Mode  string // Overrides the author's mode.
+	Rules bool   // Apply rule verdicts in rules mode.
+}
+
+// effectiveWorks is EffectiveWorks on q.
+func effectiveWorks(ctx context.Context, q querier, authorID int64, opts viewOpts) (AuthorView, error) {
 	v := AuthorView{AuthorID: authorID, Mode: "rules", Works: []int64{}, Excluded: map[int64]string{}}
 
 	var merged *int64
@@ -515,8 +520,8 @@ func effectiveWorks(ctx context.Context, q querier, authorID int64, mode string)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return v, err
 	}
-	if mode != "" {
-		v.Mode = mode
+	if opts.Mode != "" {
+		v.Mode = opts.Mode
 	}
 	if merged != nil {
 		v.MergedInto = merged
@@ -549,7 +554,9 @@ func effectiveWorks(ctx context.Context, q querier, authorID int64, mode string)
 			UNION SELECT work_id, FALSE FROM work_curation WHERE primary_author_id = ANY($1)
 		)
 		SELECT c.work_id, bool_or(c.listed), wc.status, wc.merged_into, wc.primary_author_id,
-			t.status, t.primary_author_id
+			t.status, t.primary_author_id,
+			(SELECT string_agg(rv.rule || ': ' || rv.reason, '; ' ORDER BY rv.rule)
+				FROM rule_verdicts rv WHERE rv.work_id = c.work_id)
 		FROM cand c
 		LEFT JOIN work_curation wc ON wc.work_id = c.work_id
 		LEFT JOIN work_curation t ON t.work_id = wc.merged_into
@@ -564,16 +571,20 @@ func effectiveWorks(ctx context.Context, q querier, authorID int64, mode string)
 	for rows.Next() {
 		var id int64
 		var listed bool
-		var status, tStatus *string
+		var status, tStatus, verdicts *string
 		var mergedInto, primary, tPrimary *int64
-		if err := rows.Scan(&id, &listed, &status, &mergedInto, &primary, &tStatus, &tPrimary); err != nil {
+		if err := rows.Scan(&id, &listed, &status, &mergedInto, &primary, &tStatus, &tPrimary, &verdicts); err != nil {
 			return v, err
 		}
 		if mergedInto != nil {
 			v.Excluded[id] = fmt.Sprintf("merged into %d", *mergedInto)
-			id, status, primary = *mergedInto, tStatus, tPrimary
+			// A merge target was chosen by hand, so its verdicts don't apply.
+			id, status, primary, verdicts = *mergedInto, tStatus, tPrimary, nil
 		}
-		if reason := v.exclude(ids, listed, status, primary); reason != "" {
+		if !opts.Rules {
+			verdicts = nil
+		}
+		if reason := v.exclude(ids, listed, status, primary, verdicts); reason != "" {
 			if _, seen := v.Excluded[id]; !seen && !keep[id] && reason != "-" {
 				v.Excluded[id] = reason
 			}
@@ -595,7 +606,7 @@ func effectiveWorks(ctx context.Context, q querier, authorID int64, mode string)
 
 // exclude returns why a candidate is left out, or "" to keep it. "-" means
 // rules mode never served it (e.g. the author is only the illustrator).
-func (v AuthorView) exclude(ids map[int64]bool, listed bool, status *string, primary *int64) string {
+func (v AuthorView) exclude(ids map[int64]bool, listed bool, status *string, primary *int64, verdicts *string) string {
 	if primary != nil && !ids[*primary] {
 		return fmt.Sprintf("credited to %d", *primary)
 	}
@@ -609,8 +620,14 @@ func (v AuthorView) exclude(ids map[int64]bool, listed bool, status *string, pri
 		}
 		return ""
 	}
-	if listed || canon || primary != nil {
-		return ""
+	if canon || primary != nil {
+		return "" // Manual curation wins over rules.
 	}
-	return "-"
+	if !listed {
+		return "-"
+	}
+	if verdicts != nil {
+		return "rule " + *verdicts
+	}
+	return ""
 }

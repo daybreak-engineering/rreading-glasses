@@ -34,7 +34,7 @@ func (s *Store) CurateAuthor(ctx context.Context, authorID int64, blob []byte) (
 	if err := json.Unmarshal(blob, &a); err != nil {
 		return nil, fmt.Errorf("decoding author %d: %w", authorID, err)
 	}
-	view, err := effectiveWorks(ctx, s.db, authorID, "")
+	view, err := effectiveWorks(ctx, s.db, authorID, viewOpts{Rules: s.applyRules})
 	if err != nil {
 		return nil, err
 	}

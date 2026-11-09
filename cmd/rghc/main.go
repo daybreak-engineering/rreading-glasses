@@ -25,6 +25,7 @@ type cli struct {
 
 	Bust cmd.Bust `cmd:"" help:"Bust cache entries."`
 
+	Rules    rules    `cmd:"" help:"Recompute rule verdicts from the store."`
 	Backfill backfill `cmd:"" help:"Copy every cached author, work, book and series into the store."`
 }
 
@@ -46,6 +47,26 @@ func (b *backfill) Run() error {
 	return err
 }
 
+type rules struct {
+	cmd.PGConfig
+	cmd.LogConfig
+}
+
+func (r *rules) Run() error {
+	_ = r.LogConfig.Run()
+	ctx := context.Background()
+	store, err := internal.NewStore(ctx, r.DSN())
+	if err != nil {
+		return fmt.Errorf("setting up store: %w", err)
+	}
+	res, err := store.RunRules(ctx)
+	if err != nil {
+		return err
+	}
+	slog.Info("ran rules", "works", res.Works, "junk", res.Junk, "foreign", res.Foreign, "sibling", res.Sibling, "took", res.Took)
+	return nil
+}
+
 type server struct {
 	cmd.PGConfig
 	cmd.LogConfig
@@ -58,6 +79,7 @@ type server struct {
 	HardcoverAuth     string `required:"" env:"HARDCOVER_AUTH" xor:"hardcover-auth" help:"Hardcover Authorization header, e.g. 'Bearer ...'"`
 	HardcoverAuthFile []byte `required:"" type:"filecontent" xor:"hardcover-auth" env:"HARDCOVER_AUTH_FILE" help:"File containing the Hardcover Authorization header, e.g. 'Bearer ...'"`
 
+	ApplyRules   bool `env:"APPLY_RULES" help:"Let rule verdicts remove works from rules-mode authors. Library entries can be deleted."`
 	ServeCurated bool `env:"SERVE_CURATED" help:"Apply curation to author and work responses."`
 
 	AdminPort      int    `default:"8789" env:"ADMIN_PORT" help:"Port for the curation API."`
@@ -131,6 +153,7 @@ func (s *server) Run() error {
 	}
 	ctrl.SetBudget(budget)
 	h := internal.NewHandler(ctrl)
+	store.SetApplyRules(s.ApplyRules)
 	if s.ServeCurated {
 		h.SetCurator(store)
 	}

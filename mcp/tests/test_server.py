@@ -222,3 +222,50 @@ async def test_conflict_lists_are_capped(admin: Fake, bookshelf: tuple[Fake, Fak
     assert len(res["library"]["with_files"]) == 1
     assert res["library"]["with_files_total"] == 2
     assert res["removed_total"] == 3
+
+
+async def test_reports_unmonitored_books_that_would_be_deleted(admin: Fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    ebook = fake_bookshelf(
+        "k",
+        7,
+        [
+            {"id": 90, "foreignBookId": str(WORK_PLAIN), "monitored": False, "statistics": {"bookFileCount": 0}},
+            {"id": 91, "foreignBookId": str(WORK_MONITORED), "monitored": False, "statistics": {"bookFileCount": 0}},
+        ],
+    )
+    ebook.routes[("GET", "/api/v1/edition")] = [
+        {"bookId": 90, "manualAdd": False},
+        {"bookId": 91, "manualAdd": False},
+        {"bookId": 91, "manualAdd": True},
+    ]
+    audio = fake_bookshelf("ka", 8, [])
+    monkeypatch.setattr(
+        server,
+        "_bookshelves",
+        [
+            BookshelfClient(EBOOK, transport=httpx.MockTransport(ebook)),
+            BookshelfClient(AUDIO, transport=httpx.MockTransport(audio)),
+        ],
+    )
+    admin.routes[("POST", "/admin/curation")] = curation_handler([WORK_PLAIN, WORK_MONITORED])
+
+    res = await call("set_author_mode", author_id=AUTHOR, mode="allowlist", dry_run=True)
+    assert [e["work_id"] for e in res["library"]["would_delete"]] == [WORK_PLAIN], "manual additions survive"
+
+    res = await call("set_author_mode", author_id=AUTHOR, mode="allowlist")
+    assert res["result"]["authors"] == 1, "reported, not refused"
+    assert res["library"]["would_delete"][0]["bookshelf_book_id"] == 90
+
+
+async def test_rules(admin: Fake, bookshelf: tuple[Fake, Fake]) -> None:
+    admin.routes[("POST", "/admin/rules/run")] = {"works": 3, "junk": 1, "foreign": 0, "sibling": 0, "took": "1ms"}
+    res = await call("run_rules")
+    assert res["junk"] == 1
+
+    admin.routes[("GET", f"/admin/authors/{AUTHOR}/preview")] = lambda p, _: {
+        **preview([]),
+        "rules_seen": p.get("rules"),
+    }
+    res = await call("preview_author", author_id=AUTHOR, rules=True)
+    assert res["served"] == 3
+    assert admin.calls[-1][2] == {"rules": "1"}

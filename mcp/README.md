@@ -29,6 +29,9 @@ against each library by `foreignAuthorId` / `foreignBookId`:
 
 - a removed book **with files** refuses the write unless `force=true`;
 - a removed book that is only monitored is reported as a warning;
+- a removed book with no files, not monitored and with no manually added
+  edition is listed in `library.would_delete`: Bookshelf removes it on the next
+  author refresh, and this doesn't block the write, so dry-run first;
 - if either instance isn't configured, any write that removes works needs
   `force=true`.
 

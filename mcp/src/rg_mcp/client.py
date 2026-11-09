@@ -120,6 +120,9 @@ class AdminClient(_Client):
     async def curate(self, body: dict[str, Any]) -> Any:
         return await self.request("POST", "/admin/curation", json=body)
 
+    async def run_rules(self) -> Any:
+        return await self.request("POST", "/admin/rules/run")
+
 
 class BookshelfClient(_Client):
     """Read-only Bookshelf v1 API, used to check curation against the library."""

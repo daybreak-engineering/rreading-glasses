@@ -28,6 +28,10 @@ Concepts:
   Targets can't themselves be merged.
 - Overrides: work title and default edition; edition language and hidden.
 
+Rules: `run_rules` recomputes junk, foreign and sibling verdicts. They only
+remove works from rules-mode authors when the server runs with APPLY_RULES, and
+never canon or manually overridden works. `preview_author(rules=true)` shows them.
+
 Flow: `search_authors` -> `get_author_works` (filter by status) -> `get_work`
 for editions -> write tools -> `get_curation_log` to audit.
 `preview_author(mode="allowlist")` shows what switching would drop.
@@ -35,7 +39,9 @@ for editions -> write tools -> `get_curation_log` to audit.
 Safety: every write is dry-run first and checked against both Bookshelf
 libraries (ebook and audio). It is refused if it would drop a library book
 that has files, unless `force=true`. Bookshelf deletes books that leave an
-author's list.
+author's list on its next refresh, unless an edition was added manually.
+`library.would_delete` lists fileless, unmonitored books that will go this way:
+they don't block a write, so dry-run first.
 Use `dry_run=true` on any write tool to see the effect without applying it.
 """
 
@@ -131,7 +137,7 @@ async def _apply(body: dict[str, Any], force: bool, dry_run: bool) -> dict[str, 
 
     res = await admin().curate(body)
     out: dict[str, Any] = {"result": _counts(res), "previews": summary}
-    if conflicts["with_files"] or conflicts["monitored"]:
+    if conflicts["with_files"] or conflicts["monitored"] or conflicts["would_delete"]:
         out["library"] = trimmed
     return out
 
@@ -223,14 +229,23 @@ async def preview_author(
         Literal["rules", "allowlist"] | None, Field(description="Preview this mode instead of the current one")
     ] = None,
     limit: Annotated[int, Field(ge=1, le=5000, description="Max works listed per side")] = 200,
+    rules: Annotated[bool, Field(description="Apply rule verdicts (junk, foreign, sibling) as if enabled")] = False,
 ) -> Any:
     """Compare an author's served list with the curated one, and flag library books it would drop."""
-    p = await admin().get(f"authors/{author_id}/preview", mode=mode)
+    p = await admin().get(f"authors/{author_id}/preview", mode=mode, rules="1" if rules else None)
     conflicts = await library_conflicts(bookshelves(), [p])
     return {**summarize_previews([p], limit)[0], "library": trim_conflicts(conflicts, limit)}
 
 
 # Writes
+
+
+@tool(annotations=IDEMPOTENT)
+async def run_rules() -> Any:
+    """Recompute rule verdicts from stored data. Changes nothing served unless rules are applied."""
+    if settings().read_only:
+        raise CurationError("read-only mode (RG_READ_ONLY)")
+    return await admin().run_rules()
 
 
 @tool(annotations=REMOVING)

@@ -379,14 +379,15 @@ type PreviewWork struct {
 }
 
 // PreviewAuthor reports which works curation would remove from or add to an
-// author's served list. A non-empty mode previews that mode instead.
-func (s *Store) PreviewAuthor(ctx context.Context, authorID int64, mode string) (Preview, error) {
-	return previewAuthor(ctx, s.db, authorID, mode)
+// author's served list. A non-empty mode previews that mode instead, and rules
+// previews rule verdicts as if they were applied.
+func (s *Store) PreviewAuthor(ctx context.Context, authorID int64, mode string, rules bool) (Preview, error) {
+	return previewAuthor(ctx, s.db, authorID, viewOpts{Mode: mode, Rules: rules || s.applyRules})
 }
 
-func previewAuthor(ctx context.Context, q querier, authorID int64, mode string) (Preview, error) {
+func previewAuthor(ctx context.Context, q querier, authorID int64, opts viewOpts) (Preview, error) {
 	p := Preview{AuthorID: authorID, Removed: []PreviewWork{}, Added: []PreviewWork{}}
-	view, err := effectiveWorks(ctx, q, authorID, mode)
+	view, err := effectiveWorks(ctx, q, authorID, opts)
 	if err != nil {
 		return p, err
 	}

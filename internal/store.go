@@ -31,6 +31,8 @@ const _migrationLock = 7240501
 // only inserts and updates; nothing here expires. See docs/design.md.
 type Store struct {
 	db *pgxpool.Pool
+
+	applyRules bool // Rule verdicts affect author lists.
 }
 
 // NewStore connects to Postgres and applies pending migrations.
