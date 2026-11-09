@@ -103,6 +103,61 @@ func migrate(ctx context.Context, db *pgxpool.Pool) error {
 	return nil
 }
 
+// LoadBudget returns saved upstream request counts per Unix hour.
+func (s *Store) LoadBudget(ctx context.Context) (map[int64]int64, error) {
+	rows, err := s.db.Query(ctx, `SELECT hour, count FROM upstream_budget`)
+	if err != nil {
+		return nil, err
+	}
+	out := map[int64]int64{}
+	var hour, count int64
+	_, err = pgx.ForEachRow(rows, []any{&hour, &count}, func() error {
+		out[hour] = count
+		return nil
+	})
+	return out, err
+}
+
+// SaveBudget stores counts per Unix hour and drops hours older than a day
+// before the newest one.
+func (s *Store) SaveBudget(ctx context.Context, counts map[int64]int64) error {
+	if len(counts) == 0 {
+		return nil
+	}
+	b := &pgx.Batch{}
+	var newest int64
+	for hour, count := range counts {
+		newest = max(newest, hour)
+		b.Queue(`INSERT INTO upstream_budget (hour, count) VALUES ($1, $2)
+			ON CONFLICT (hour) DO UPDATE SET count = GREATEST(upstream_budget.count, EXCLUDED.count)`, hour, count)
+	}
+	b.Queue(`DELETE FROM upstream_budget WHERE hour <= $1`, newest-24)
+	return s.send(ctx, b)
+}
+
+// PersistBudget restores t's counts and then saves them every interval until
+// ctx ends. Failures only cost accuracy, so they're logged.
+func (s *Store) PersistBudget(ctx context.Context, t *BudgetTransport, interval time.Duration) {
+	counts, err := s.LoadBudget(ctx)
+	if err != nil {
+		Log(ctx).Warn("problem loading upstream budget", "err", err)
+	}
+	t.Restore(counts)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := s.SaveBudget(ctx, t.Snapshot()); err != nil {
+				Log(ctx).Warn("problem saving upstream budget", "err", err)
+			}
+		}
+	}
+}
+
 // Close releases the store's connections.
 func (s *Store) Close() { s.db.Close() }
 

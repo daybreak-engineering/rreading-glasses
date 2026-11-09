@@ -138,8 +138,8 @@ func (t errorProxyTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 var errBudgetExhausted = errors.Join(statusErr(http.StatusTooManyRequests), errors.New("upstream daily request budget exhausted"))
 
 // BudgetTransport caps requests over a rolling 24h window, counted in hourly
-// buckets. Requests past the cap fail without being sent. Counts are kept in
-// memory, so a restart resets them.
+// buckets. Requests past the cap fail without being sent. Counts live in memory;
+// PersistBudget saves them so a restart doesn't reset the budget.
 type BudgetTransport struct {
 	http.RoundTripper
 	Daily      int64   // Cap per 24h; 0 disables the cap.
@@ -191,6 +191,37 @@ func (t *BudgetTransport) AllowBackground() bool {
 	}
 	share := cmp.Or(t.Background, 0.8)
 	return float64(t.Used()) < float64(t.Daily)*share
+}
+
+// Snapshot returns request counts per Unix hour, for the last 24h.
+func (t *BudgetTransport) Snapshot() map[int64]int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	h := t.hour()
+	out := make(map[int64]int64, len(t.counts))
+	for i, c := range t.counts {
+		if c > 0 && h-t.hours[i] < 24 {
+			out[t.hours[i]] = c
+		}
+	}
+	return out
+}
+
+// Restore adds counts from an earlier run. Hours outside the window are ignored.
+func (t *BudgetTransport) Restore(counts map[int64]int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.hour()
+	for h, c := range counts {
+		if h > now || now-h >= 24 {
+			continue
+		}
+		if t.hours[h%24] != h {
+			t.hours[h%24] = h
+			t.counts[h%24] = 0
+		}
+		t.counts[h%24] += c
+	}
 }
 
 func (t *BudgetTransport) hour() int64 {

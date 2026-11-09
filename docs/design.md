@@ -208,5 +208,7 @@ Upgrading or patching Bookshelf? Check these first.
 Replace TTL-driven refresh with a scheduler: refresh the oldest rows first,
 library authors first, within the budget. Use bulk queries
 (`books(where: {id: {_in: [...]}})`) to cut request count. Store raw
-payloads and `last_seen_upstream` per row. Persist the budget counter in
-Postgres so restarts don't reset it.
+payloads and `last_seen_upstream` per row.
+
+Done: the budget counter is saved to `upstream_budget` every 15s and restored
+at startup, so a restart can only lose the last few seconds of counts.

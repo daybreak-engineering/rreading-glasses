@@ -239,3 +239,29 @@ func TestStoreConcurrentIngest(t *testing.T) {
 	require.NoError(t, s.db.QueryRow(ctx, `SELECT count(*) FROM author_works WHERE author_id = ANY($1)`, authors).Scan(&n))
 	assert.Equal(t, len(authors)*len(works), n)
 }
+
+func TestPersistBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s := newTestStore(t)
+	_, err := s.db.Exec(ctx, `DELETE FROM upstream_budget`)
+	require.NoError(t, err)
+
+	now := time.Unix(1_800_000_000, 0)
+	hour := now.Unix() / 3600
+	require.NoError(t, s.SaveBudget(ctx, map[int64]int64{hour: 7, hour - 30: 4}))
+	require.NoError(t, s.SaveBudget(ctx, map[int64]int64{hour: 5}), "a lower count never overwrites")
+	got, err := s.LoadBudget(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, map[int64]int64{hour: 7}, got, "hours older than a day are dropped")
+
+	bt := &BudgetTransport{Daily: 100, now: func() time.Time { return now }}
+	go s.PersistBudget(ctx, bt, 5*time.Millisecond)
+	assert.Eventually(t, func() bool { return bt.Used() == 7 }, 5*time.Second, 5*time.Millisecond, "restored")
+
+	bt.take()
+	assert.Eventually(t, func() bool {
+		got, err := s.LoadBudget(ctx)
+		return err == nil && got[hour] == 8
+	}, 5*time.Second, 5*time.Millisecond, "saved")
+}

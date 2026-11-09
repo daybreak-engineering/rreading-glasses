@@ -121,6 +121,8 @@ func (s *server) Run() error {
 		Help: "Upstream requests sent in the last 24h.",
 	}, func() float64 { return float64(budget.Used()) }))
 
+	go store.PersistBudget(ctx, budget, 15*time.Second)
+
 	hcTransport := internal.ScopedTransport{
 		Host: s.Upstream,
 		RoundTripper: &internal.HeaderTransport{

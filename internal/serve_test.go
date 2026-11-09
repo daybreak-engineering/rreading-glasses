@@ -391,3 +391,15 @@ func TestCurateSeriesAndRecommended(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []int64{f.w[4], unknown}, recs.WorkIDs, "merged takes its target's place, repeats go")
 }
+
+func TestRecommendationsReturnsTrending(t *testing.T) {
+	t.Parallel()
+	getter := NewMockgetter(gomock.NewController(t)) // Any GetWork call fails the test.
+	ctrl, err := NewController(newMemoryCache(), getter, nil, nil)
+	require.NoError(t, err)
+	getter.EXPECT().Recommendations(gomock.Any(), int64(1)).Return(RecommentationsResource{WorkIDs: []int64{1, 2}}, nil)
+
+	got, err := ctrl.Recommendations(t.Context(), 1)
+	require.NoError(t, err)
+	assert.Equal(t, []int64{1, 2}, got.WorkIDs)
+}

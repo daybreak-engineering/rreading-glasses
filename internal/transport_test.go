@@ -112,3 +112,19 @@ func TestBudgetTransport(t *testing.T) {
 	_, err = bt.RoundTrip(req)
 	require.NoError(t, err)
 }
+
+func TestBudgetTransportRestore(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_800_000_000, 0)
+	hour := now.Unix() / 3600
+	bt := &BudgetTransport{Daily: 10, now: func() time.Time { return now }}
+
+	bt.Restore(map[int64]int64{hour: 3, hour - 23: 2, hour - 24: 99, hour + 1: 99})
+	assert.Equal(t, int64(5), bt.Used(), "only the last 24h counts")
+	assert.Equal(t, map[int64]int64{hour: 3, hour - 23: 2}, bt.Snapshot())
+
+	now = now.Add(time.Hour)
+	assert.Equal(t, map[int64]int64{hour: 3}, bt.Snapshot(), "older hours fall out of the window")
+	assert.Equal(t, int64(3), bt.Used())
+}
